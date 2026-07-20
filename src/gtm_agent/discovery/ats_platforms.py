@@ -84,6 +84,12 @@ BOARD_TOKEN_PATTERNS: dict[AtsPlatform, re.Pattern[str]] = {
     # without the lookahead, "j" would be mistaken for an account slug.
     AtsPlatform.WORKABLE: re.compile(r"apply\.workable\.com/(?!j/)([\w-]+)", re.I),
     AtsPlatform.SMARTRECRUITERS: re.compile(r"careers\.smartrecruiters\.com/([\w-]+)", re.I),
+    # Recruitee's token is the subdomain itself, not a path segment after a
+    # fixed host — the only adapter here shaped that way.
+    AtsPlatform.RECRUITEE: re.compile(r"([\w-]+)\.recruitee\.com", re.I),
+    # Rippling's token is the first path segment after the fixed host —
+    # works for the bare company path, `/jobs`, or `/jobs/{id}` alike.
+    AtsPlatform.RIPPLING: re.compile(r"ats\.rippling\.com/([\w-]+)", re.I),
 }
 
 

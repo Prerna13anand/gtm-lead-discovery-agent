@@ -1,0 +1,60 @@
+{
+  "offers": [
+    {
+      "id": 2613887,
+      "title": "Senior Backend Engineer",
+      "slug": "senior-backend-engineer",
+      "careers_url": "https://acme.recruitee.com/o/senior-backend-engineer",
+      "careers_apply_url": "https://acme.recruitee.com/o/senior-backend-engineer/c/new",
+      "department": "Product & Engineering",
+      "location": "Rotterdam, Zuid-Holland, Netherlands",
+      "city": "Rotterdam",
+      "country": "Netherlands",
+      "country_code": "NL",
+      "state_name": "Zuid-Holland",
+      "remote": false,
+      "hybrid": true,
+      "on_site": false,
+      "employment_type_code": "fulltime_fixed_term",
+      "published_at": "2026-05-22 12:53:40 UTC",
+      "created_at": "2026-05-22 11:24:08 UTC",
+      "status": "published",
+      "description": "<p>Build the backend at Acme.</p>",
+      "requirements": "<ul><li>5+ years experience</li></ul>",
+      "translations": {
+        "en": {
+          "description": "<p>Build the backend at Acme.</p>",
+          "requirements": "<ul><li>5+ years experience</li></ul>"
+        }
+      }
+    },
+    {
+      "id": 2613888,
+      "title": "Founding Designer",
+      "slug": "founding-designer",
+      "careers_url": "https://acme.recruitee.com/o/founding-designer",
+      "careers_apply_url": "https://acme.recruitee.com/o/founding-designer/c/new",
+      "department": "Design",
+      "location": "Remote",
+      "city": null,
+      "country": null,
+      "country_code": null,
+      "state_name": null,
+      "remote": true,
+      "hybrid": false,
+      "on_site": false,
+      "employment_type_code": "fulltime",
+      "published_at": "2026-06-01 09:00:00 UTC",
+      "created_at": "2026-05-30 08:00:00 UTC",
+      "status": "published",
+      "description": "<p>Own design end to end at Acme.</p>",
+      "requirements": "<p>Strong portfolio required.</p>",
+      "translations": {
+        "en": {
+          "description": "<p>Own design end to end at Acme.</p>",
+          "requirements": "<p>Strong portfolio required.</p>"
+        }
+      }
+    }
+  ]
+}
