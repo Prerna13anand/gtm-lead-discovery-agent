@@ -1,0 +1,364 @@
+"""Stage 1 — Source Resolution (spec §4).
+
+Goal: from `(company_name, domain)` to a canonical careers URL with a
+confidence score.
+
+Phase 1 implements the resolution ladder's strategies A, B, and E:
+    A — homepage link extraction (`HomepageLinkStrategy`)
+    B — conventional path probing (`PathProbeStrategy`)
+    E — manual override (handled directly in `resolve_source`, since it
+        short-circuits the entire ladder rather than being one more rung)
+
+Strategies C (sitemap.xml) and D (Tavily search fallback) are registered as
+placeholders that always decline (return `None`) — real implementations are
+later-phase work.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol
+from urllib.parse import urljoin, urlparse
+
+import httpx
+from selectolax.parser import HTMLParser
+
+from gtm_agent.core.fetch import FetchError, Fetcher
+from gtm_agent.core.logging import get_logger
+from gtm_agent.discovery.ats_platforms import known_ats_platform_for_host
+from gtm_agent.models.careers_source import CareersSource, ResolutionStrategy
+from gtm_agent.models.company import Company
+from gtm_agent.models.results import SourceResolutionStatus, StageResult
+
+logger = get_logger(__name__)
+
+# --- Strategy A scoring (spec §4.1) ---
+_LINK_TEXT_RE = re.compile(r"careers?|jobs|join us|we'?re hiring|work with us|open roles", re.I)
+_HREF_PATH_RE = re.compile(r"careers?|jobs|join|hiring|opportunities", re.I)
+_BLOG_PATH_RE = re.compile(r"/blog/|/news/|/press/", re.I)
+_OTHER_COMPANIES_TEXT_RE = re.compile(r"other companies|browse (all )?jobs|job board for", re.I)
+
+_ANCHOR_ACCEPT_THRESHOLD = 5  # must clear at least one strong positive signal
+
+# --- Strategy B conventional paths (spec §4.1) ---
+_CONVENTIONAL_PATHS = (
+    "/careers",
+    "/career",
+    "/jobs",
+    "/join",
+    "/join-us",
+    "/hiring",
+    "/work-with-us",
+    "/about/careers",
+    "/company/careers",
+    "/en/careers",
+)
+_PATH_PROBE_DELAY_SECONDS = 0.5  # placeholder politeness gap; real rate limiting is a fetch-layer TODO (§16.3)
+
+# --- Validation markers (spec §4.2) ---
+_CAREERS_COPY_RE = re.compile(r"open positions|join our team|current openings", re.I)
+_JOB_DETAIL_HREF_RE = re.compile(r"/jobs?/[\w-]+", re.I)
+_MIN_JOB_LIKE_LINKS = 3
+
+# --- Confidence table (spec §4.3) ---
+_CONFIDENCE_HOMEPAGE_ATS = 0.95
+_CONFIDENCE_HOMEPAGE_OWN_DOMAIN = 0.85
+_CONFIDENCE_PATH_PROBE = 0.75
+_CONFIDENCE_FLOOR = 0.50
+
+
+class DomainUnreachableError(Exception):
+    """Raised internally when the company's domain itself cannot be reached (spec §4.4)."""
+
+
+@dataclass(frozen=True)
+class ResolutionCandidate:
+    url: str
+    confidence: float
+    strategy: ResolutionStrategy
+    validated: bool = True
+
+
+class ResolutionStrategyHandler(Protocol):
+    strategy: ResolutionStrategy
+
+    async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
+        """Return a candidate if this strategy found one, else None to fall through."""
+        ...
+
+
+def _looks_like_careers_page(html: str) -> bool:
+    """Spec §4.2 validation: markers, or enough job-detail-shaped links."""
+    tree = HTMLParser(html)
+    body_text = tree.body.text(separator=" ", strip=True) if tree.body else html
+    if _CAREERS_COPY_RE.search(body_text):
+        return True
+
+    job_like_links = 0
+    for anchor in tree.css("a[href]"):
+        href = anchor.attributes.get("href") or ""
+        if _JOB_DETAIL_HREF_RE.search(href):
+            job_like_links += 1
+            if job_like_links >= _MIN_JOB_LIKE_LINKS:
+                return True
+
+    if 'application/ld+json' in html and "JobPosting" in html:
+        return True
+
+    return False
+
+
+def _score_anchor(anchor_text: str, href: str, in_footer_or_nav: bool) -> tuple[float, bool]:
+    """Score one anchor per spec §4.1 Strategy A. Returns (score, is_known_ats_domain)."""
+    score = 0.0
+    is_ats = False
+
+    if _LINK_TEXT_RE.search(anchor_text):
+        score += 5
+    if _HREF_PATH_RE.search(href):
+        score += 4
+
+    parsed = urlparse(href)
+    if parsed.netloc and known_ats_platform_for_host(parsed.netloc) is not None:
+        score += 5
+        is_ats = True
+
+    if in_footer_or_nav:
+        score += 2
+    if _BLOG_PATH_RE.search(href):
+        score -= 3
+    if _OTHER_COMPANIES_TEXT_RE.search(anchor_text):
+        score -= 5
+
+    return score, is_ats
+
+
+class HomepageLinkStrategy:
+    """Strategy A (spec §4.1). Preferred: reflects what the company actually links to."""
+
+    strategy = ResolutionStrategy.HOMEPAGE_LINK
+
+    async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
+        homepage_url = f"https://{company.domain}"
+        try:
+            result = await fetcher.get(homepage_url)
+        except FetchError as exc:
+            if isinstance(exc.original, (httpx.ConnectError, httpx.ConnectTimeout)):
+                raise DomainUnreachableError(str(exc)) from exc
+            logger.info("homepage_fetch_failed", domain=company.domain, error=str(exc))
+            return None
+
+        if result.status_code >= 400:
+            return None
+
+        tree = HTMLParser(result.text)
+        best_score = 0.0
+        best_href: str | None = None
+        best_is_ats = False
+
+        for anchor in tree.css("a[href]"):
+            href = anchor.attributes.get("href") or ""
+            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+            text = anchor.text(strip=True) or ""
+            in_footer_or_nav = _in_footer_or_nav(anchor)
+            score, is_ats = _score_anchor(text, href, in_footer_or_nav)
+            if score > best_score:
+                best_score = score
+                best_href = href
+                best_is_ats = is_ats
+
+        if best_href is None or best_score < _ANCHOR_ACCEPT_THRESHOLD:
+            return None
+
+        resolved_url = urljoin(str(result.url), best_href)
+
+        if best_is_ats:
+            # spec §4.2: being on a known ATS domain satisfies validation on its own.
+            return ResolutionCandidate(
+                url=resolved_url,
+                confidence=_CONFIDENCE_HOMEPAGE_ATS,
+                strategy=self.strategy,
+                validated=True,
+            )
+
+        validated = await _fetch_and_validate(resolved_url, fetcher)
+        return ResolutionCandidate(
+            url=resolved_url,
+            confidence=_CONFIDENCE_HOMEPAGE_OWN_DOMAIN,
+            strategy=self.strategy,
+            validated=validated,
+        )
+
+
+def _in_footer_or_nav(anchor) -> bool:  # noqa: ANN001 — selectolax Node has no public type export
+    node = anchor.parent
+    while node is not None:
+        if node.tag in ("footer", "nav"):
+            return True
+        node = node.parent
+    return False
+
+
+async def _fetch_and_validate(url: str, fetcher: Fetcher) -> bool:
+    try:
+        result = await fetcher.get(url)
+    except FetchError:
+        return False
+    if result.status_code >= 400:
+        return False
+    return _looks_like_careers_page(result.text)
+
+
+class PathProbeStrategy:
+    """Strategy B (spec §4.1). Probed sequentially, never in parallel, per §2.5."""
+
+    strategy = ResolutionStrategy.PATH_PROBE
+
+    async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
+        for i, path in enumerate(_CONVENTIONAL_PATHS):
+            if i > 0:
+                await asyncio.sleep(_PATH_PROBE_DELAY_SECONDS)
+
+            url = f"https://{company.domain}{path}"
+            try:
+                head_result = await fetcher.head(url)
+            except FetchError:
+                continue
+
+            status = head_result.status_code
+            if status in (405, 501) or status == 200 and not head_result.text:
+                # HEAD unsupported or inconclusive — fall back to GET (spec §4.1)
+                try:
+                    get_result = await fetcher.get(url)
+                except FetchError:
+                    continue
+                status = get_result.status_code
+                body = get_result.text
+            elif 200 <= status < 300:
+                try:
+                    get_result = await fetcher.get(url)
+                except FetchError:
+                    continue
+                body = get_result.text
+            else:
+                continue
+
+            if not (200 <= status < 300):
+                continue
+
+            if _looks_like_careers_page(body):
+                return ResolutionCandidate(
+                    url=url,
+                    confidence=_CONFIDENCE_PATH_PROBE,
+                    strategy=self.strategy,
+                    validated=True,
+                )
+
+        return None
+
+
+class SitemapStrategy:
+    """Strategy C (spec §4.1) — NOT IMPLEMENTED in Phase 1. Always declines."""
+
+    strategy = ResolutionStrategy.SITEMAP
+
+    async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
+        logger.debug("sitemap_strategy_not_implemented", domain=company.domain)
+        return None
+
+
+class TavilySearchStrategy:
+    """Strategy D (spec §4.1) — NOT IMPLEMENTED in Phase 1. Always declines.
+
+    Depends on `services.tavily`, which is a stub in this phase (no API calls yet).
+    """
+
+    strategy = ResolutionStrategy.TAVILY_SEARCH
+
+    async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
+        logger.debug("tavily_strategy_not_implemented", domain=company.domain)
+        return None
+
+
+_STRATEGY_LADDER: tuple[ResolutionStrategyHandler, ...] = (
+    HomepageLinkStrategy(),
+    PathProbeStrategy(),
+    SitemapStrategy(),
+    TavilySearchStrategy(),
+)
+
+
+async def resolve_source(
+    company: Company,
+    fetcher: Fetcher,
+    *,
+    manual_override_url: str | None = None,
+) -> StageResult[CareersSource, SourceResolutionStatus]:
+    """Run the resolution ladder for one company. Spec §4.
+
+    A manual override, if given, short-circuits the ladder entirely (spec §4.1
+    Strategy E) and is never overwritten by automated resolution.
+    """
+    now = datetime.now(UTC)
+
+    if manual_override_url:
+        source = CareersSource(
+            company_id=company.id,
+            careers_url=manual_override_url,
+            resolution_strategy=ResolutionStrategy.MANUAL_OVERRIDE,
+            resolution_confidence=1.0,
+            is_manual_override=True,
+            needs_review=False,
+            created_at=now,
+            last_verified_at=now,
+        )
+        return StageResult(status=SourceResolutionStatus.RESOLVED, value=source)
+
+    try:
+        for handler in _STRATEGY_LADDER:
+            candidate = await handler.attempt(company, fetcher)
+            if candidate is None:
+                continue
+
+            if candidate.confidence < _CONFIDENCE_FLOOR:
+                source = CareersSource(
+                    company_id=company.id,
+                    careers_url=candidate.url,
+                    resolution_strategy=candidate.strategy,
+                    resolution_confidence=candidate.confidence,
+                    needs_review=True,
+                    created_at=now,
+                )
+                return StageResult(status=SourceResolutionStatus.NEEDS_REVIEW, value=source)
+
+            if not candidate.validated:
+                source = CareersSource(
+                    company_id=company.id,
+                    careers_url=candidate.url,
+                    resolution_strategy=candidate.strategy,
+                    resolution_confidence=candidate.confidence,
+                    needs_review=True,
+                    created_at=now,
+                )
+                return StageResult(status=SourceResolutionStatus.RESOLUTION_UNVALIDATED, value=source)
+
+            source = CareersSource(
+                company_id=company.id,
+                careers_url=candidate.url,
+                resolution_strategy=candidate.strategy,
+                resolution_confidence=candidate.confidence,
+                needs_review=False,
+                created_at=now,
+                last_verified_at=now,
+            )
+            return StageResult(status=SourceResolutionStatus.RESOLVED, value=source)
+    except DomainUnreachableError as exc:
+        logger.warning("domain_unreachable", domain=company.domain, error=str(exc))
+        return StageResult(status=SourceResolutionStatus.DOMAIN_UNREACHABLE, detail=str(exc))
+
+    logger.info("no_careers_page_found", company_id=company.id, domain=company.domain)
+    return StageResult(status=SourceResolutionStatus.NO_CAREERS_PAGE, detail="resolution ladder exhausted")

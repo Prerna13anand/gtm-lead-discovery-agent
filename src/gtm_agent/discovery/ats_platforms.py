@@ -1,0 +1,62 @@
+"""Static ATS platform reference data — spec Appendix A.
+
+Shared by Stage 1 (source resolution scores a homepage link higher when it
+points at a known ATS domain) and Stage 2 (ATS fingerprinting uses the same
+domains as its primary detection signal).
+
+Build note (spec §5.3): the specific endpoint shapes are documented from
+public ATS board APIs but must be verified against current vendor
+documentation before Phase 2 implementation. This module holds detection
+domains only, not endpoint shapes.
+"""
+
+from gtm_agent.models.ats import AtsPlatform
+
+# Host suffixes that identify a known ATS. A match is a decisive detection
+# signal (spec §5.1 #1) and, in Stage 1, the strongest single scoring signal
+# for a homepage anchor (spec §4.1 Strategy A: "+5 href host is a known ATS
+# domain — strongest single signal").
+ATS_HOST_SUFFIXES: dict[AtsPlatform, tuple[str, ...]] = {
+    AtsPlatform.GREENHOUSE: ("boards.greenhouse.io", "job-boards.greenhouse.io"),
+    AtsPlatform.LEVER: ("jobs.lever.co",),
+    AtsPlatform.ASHBY: ("jobs.ashbyhq.com",),
+    AtsPlatform.WORKABLE: ("apply.workable.com",),
+    AtsPlatform.SMARTRECRUITERS: ("careers.smartrecruiters.com",),
+    AtsPlatform.RECRUITEE: ("recruitee.com",),
+    AtsPlatform.RIPPLING: ("ats.rippling.com",),
+    AtsPlatform.PERSONIO: ("jobs.personio.de", "jobs.personio.com"),
+}
+
+# Embed script / iframe src fragments — spec §5.1 #3. Decisive when present;
+# the board token is in the URL or an adjacent `data-` attribute.
+ATS_EMBED_SRC_FRAGMENTS: dict[AtsPlatform, tuple[str, ...]] = {
+    AtsPlatform.GREENHOUSE: ("boards.greenhouse.io/embed/job_board",),
+    AtsPlatform.LEVER: ("cdn.lever.co",),
+    AtsPlatform.ASHBY: ("embed.ashbyhq.com",),
+}
+
+# DOM markers — spec §5.1 #4. Strong signal, checked when no URL/embed signal fired.
+ATS_DOM_MARKERS: dict[AtsPlatform, tuple[str, ...]] = {
+    AtsPlatform.GREENHOUSE: ("#grnhse_app",),
+    AtsPlatform.LEVER: (".lever-job", "[class*='lever-jobs']"),
+    AtsPlatform.ASHBY: ("[data-ashby-embed]", "[id*='ashby']"),
+}
+
+
+def known_ats_platform_for_host(host: str) -> AtsPlatform | None:
+    """Return the ATS platform for a hostname, if it matches a known ATS domain."""
+    host = host.lower().lstrip(".")
+    for platform, suffixes in ATS_HOST_SUFFIXES.items():
+        for suffix in suffixes:
+            if host == suffix or host.endswith(f".{suffix}"):
+                return platform
+    return None
+
+
+def known_ats_platform_for_embed_src(src: str) -> AtsPlatform | None:
+    """Return the ATS platform if a script/iframe src matches a known embed pattern."""
+    src_lower = src.lower()
+    for platform, fragments in ATS_EMBED_SRC_FRAGMENTS.items():
+        if any(fragment in src_lower for fragment in fragments):
+            return platform
+    return None
