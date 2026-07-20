@@ -1,0 +1,40 @@
+{
+  "jobs": [
+    {
+      "id": "d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "title": "Senior Backend Engineer",
+      "department": "Engineering",
+      "team": "Platform",
+      "employmentType": "FullTime",
+      "location": "Remote - US",
+      "secondaryLocations": [],
+      "publishedAt": "2026-05-15T00:00:00.000+00:00",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "address": { "postalAddress": { "addressCountry": "United States" } },
+      "jobUrl": "https://jobs.ashbyhq.com/acme/d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/d3bc1ced-3ce4-4086-a050-555055dbb1ff/application",
+      "descriptionHtml": "<p>We build things.</p><ul><li>5+ years experience</li></ul>",
+      "descriptionPlain": "We build things.\n5+ years experience"
+    },
+    {
+      "id": "a1b2c3d4-5e6f-4a3b-8c9d-0e1f2a3b4c5d",
+      "title": "Founding Design Lead",
+      "department": "Design",
+      "team": "Design",
+      "employmentType": "FullTime",
+      "location": "San Francisco, CA",
+      "secondaryLocations": [],
+      "publishedAt": "2026-05-20T00:00:00.000+00:00",
+      "isListed": true,
+      "isRemote": false,
+      "workplaceType": "Onsite",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/a1b2c3d4-5e6f-4a3b-8c9d-0e1f2a3b4c5d",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/a1b2c3d4-5e6f-4a3b-8c9d-0e1f2a3b4c5d/application",
+      "descriptionHtml": "<p>Own design end to end.</p>",
+      "descriptionPlain": "Own design end to end."
+    }
+  ],
+  "apiVersion": 1
+}
