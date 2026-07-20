@@ -20,3 +20,4 @@ dist/
 # Logs and local data
 *.log
 .data/
+.gstack/

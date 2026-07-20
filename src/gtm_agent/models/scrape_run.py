@@ -25,14 +25,24 @@ class ScrapeRunStatus(StrEnum):
     separately so it's traceable to its actual source, not silently folded
     into the §17 table as if it belonged there.
 
-    Several of these values are not reachable by this codebase's current
-    Phase 1 logic — `robots_disallowed` and `render_timeout` need fetch-layer
-    and rendered-DOM capabilities that are explicit later-phase TODOs;
-    `zero_jobs_suspicious` needs Stage 5 change detection to compare against
-    a prior run, which is explicitly Phase 2 (spec: "Change detection is
-    Phase 2, not Phase 1"); `partial` needs a two-phase/selective-hydration
-    path none of the three real adapters take (all three are inline). They
-    are still declared here for schema completeness, matching how
+    As of the Phase 2 Rendered-DOM and Generic-HTML adapters, every real
+    extraction path is wired to a status here: `render_timeout` and
+    `parse_degraded` are both reachable (Rendered-DOM's Playwright timeout
+    and its DOM-link fallback; Generic-HTML's heuristic path, always
+    degraded by construction — spec §6.2.4). Three values are still not
+    reachable by this codebase's current logic:
+        - `robots_disallowed` needs fetch-layer robots.txt consultation,
+          an explicit later-phase TODO in `core/fetch.py` (spec §21.1) —
+          a Compliance & Politeness feature, not an extraction-adapter one.
+        - `zero_jobs_suspicious` needs Stage 5 change detection to compare
+          against a prior run, explicitly out of scope until that stage is
+          built (spec: "Change detection is Phase 2, not Phase 1" — deferred
+          further within Phase 2 to keep this milestone scoped).
+        - `partial` is an orchestrator-level outcome ("some pages hydrated,
+          some failed" across a whole run) — no orchestrator exists yet to
+          produce it; it's a property of a multi-posting hydration sweep,
+          not of any single adapter's `discover()`/`hydrate()` call.
+    They are still declared here for schema completeness, matching how
     `ExtractionStatus`/`SourceResolutionStatus` already include not-yet-
     reachable values (see models/results.py) — declaring the full enum is
     not the same as implementing the detection logic behind each value.

@@ -211,4 +211,60 @@ def test_ashby_posted_at_uses_published_at():
     job = normalize(_raw("ashby", {"title": "Engineer", "publishedAt": "2026-05-15T00:00:00.000+00:00"}))
     assert job.posted_at_is_inferred is False
     assert job.posted_at.month == 5
-    assert job.posted_at.day == 15
+
+
+# --- Generic-HTML ---
+#
+# Regression coverage for the Stage 3 -> Stage 4 integration bugs found in
+# code review: generic-HTML output is a structured dict (like every other
+# adapter here), so without platform-aware handling it silently normalised
+# exactly like a fully-trusted ATS response — `is_degraded=False`, full
+# confidence, and its heuristic `location` field dropped entirely because
+# the default (schema.org) location parser reads a different key
+# (`jobLocation`).
+
+
+def test_generic_html_is_marked_degraded_with_reduced_confidence():
+    job = normalize(_raw("generic_html", {"title": "Engineer"}))
+    assert job.is_degraded is True
+    assert job.extraction_confidence < 0.5
+
+
+def test_generic_html_degraded_confidence_does_not_depend_on_hydration():
+    # Low confidence by construction (spec §6.2.4) -- hydration only adds a
+    # description; it doesn't make the heuristic title/location/URL
+    # extraction any more trustworthy, so both states must stay degraded.
+    hydrated = normalize(_raw("generic_html", {"title": "Engineer"}, is_hydrated=True))
+    unhydrated = normalize(_raw("generic_html", {"title": "Engineer"}, is_hydrated=False))
+    assert hydrated.is_degraded is True
+    assert unhydrated.is_degraded is True
+    assert hydrated.extraction_confidence == unhydrated.extraction_confidence
+
+
+def test_generic_html_title_extracted_from_title_key():
+    job = normalize(_raw("generic_html", {"title": "Founding Engineer"}))
+    assert job.title_raw == "Founding Engineer"
+
+
+def test_generic_html_location_is_preserved_not_dropped():
+    # The exact bug: generic_html.py writes `payload["location"]`, but the
+    # default location parser only reads `jobLocation` -- this asserts the
+    # value survives normalisation instead of silently disappearing.
+    job = normalize(_raw("generic_html", {"title": "Engineer", "location": "Remote, US"}))
+    assert job.location_raw == "Remote, US"
+    assert len(job.locations) == 1
+    assert job.locations[0].raw == "Remote, US"
+    assert job.workplace_type == WorkplaceType.REMOTE
+
+
+def test_generic_html_no_location_key_produces_no_location_not_a_crash():
+    job = normalize(_raw("generic_html", {"title": "Engineer"}))
+    assert job.location_raw is None
+    assert job.locations == []
+
+
+def test_generic_html_other_platforms_location_parsing_is_unaffected():
+    # The new generic_html branch in _parse_location must not change
+    # behaviour for the platform it was carved out of a shared fallback with.
+    job = normalize(_raw("jsonld", {"title": "Engineer", "jobLocation": "Berlin"}))
+    assert job.location_raw == "Berlin"

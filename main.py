@@ -60,10 +60,12 @@ from gtm_agent.discovery.normalization import normalize_batch  # noqa: E402
 from gtm_agent.discovery.source_resolution import resolve_source  # noqa: E402
 from gtm_agent.models.ats import AtsPlatform  # noqa: E402
 from gtm_agent.models.company import Company  # noqa: E402
+from gtm_agent.models.job import RawPosting  # noqa: E402
 from gtm_agent.models.results import (  # noqa: E402
     AtsFingerprintStatus,
     ExtractionStatus,
     SourceResolutionStatus,
+    StageResult,
 )
 from gtm_agent.models.scrape_run import ScrapeRun, ScrapeRunStatus  # noqa: E402
 
@@ -94,6 +96,30 @@ _EXTRACTION_STATUS_TO_RUN_STATUS: dict[ExtractionStatus, ScrapeRunStatus] = {
     ExtractionStatus.RATE_LIMITED: ScrapeRunStatus.RATE_LIMITED,
     ExtractionStatus.PARSE_DEGRADED: ScrapeRunStatus.PARSE_DEGRADED,
 }
+
+
+def _extraction_reached_stage4(extraction_result: StageResult[list[RawPosting], ExtractionStatus]) -> bool:
+    """Should Stage 3's output proceed into Stage 4 normalisation?
+
+    Only a genuine failure — no usable postings at all — should stop the
+    pipeline here. `PARSE_DEGRADED` still carries a real (if heuristically
+    extracted) posting list and must be published per spec §17: "Published
+    with low confidence + flag" — not silently discarded like a hard failure
+    (`BLOCKED_403`, `SCHEMA_VIOLATION`, ...), none of which ever set `.value`.
+    Checking `.value is not None` is therefore equivalent to, but more
+    direct than, enumerating every non-failure `ExtractionStatus` by name.
+    """
+    return extraction_result.value is not None
+
+
+def _final_run_status(extraction_status: ExtractionStatus) -> ScrapeRunStatus:
+    """The `scrape_run` status once Stage 4 has actually run. A degraded
+    extraction stays visibly degraded in the ledger (spec §17) rather than
+    being reported as an indistinguishable `success`.
+    """
+    if extraction_status == ExtractionStatus.PARSE_DEGRADED:
+        return ScrapeRunStatus.PARSE_DEGRADED
+    return ScrapeRunStatus.SUCCESS
 
 
 @click.group()
@@ -219,7 +245,7 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
             return
 
         extraction_result = await adapter.discover(source, fetcher)
-        if extraction_result.status != ExtractionStatus.SUCCESS or extraction_result.value is None:
+        if not _extraction_reached_stage4(extraction_result):
             click.echo(f"  status: {extraction_result.status.value}")
             if extraction_result.detail:
                 click.echo(f"  detail: {extraction_result.detail}")
@@ -237,6 +263,8 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
 
         raw_postings = extraction_result.value
         click.echo(f"  discovered {len(raw_postings)} raw posting(s)")
+        if extraction_result.status == ExtractionStatus.PARSE_DEGRADED:
+            click.echo("  NOTE: parse_degraded — heuristic extraction, publishing with reduced confidence")
 
         click.echo("\n== Stage 4: Normalisation ==")
         job_postings = normalize_batch(raw_postings) if raw_postings else []
@@ -257,7 +285,7 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
         requests_made, bytes_made = _counts()
         run = ledger.close_run(
             run,
-            status=ScrapeRunStatus.SUCCESS,
+            status=_final_run_status(extraction_result.status),
             jobs_found=len(job_postings),
             adapter_used=routed_platform.value,
             http_requests_made=requests_made,

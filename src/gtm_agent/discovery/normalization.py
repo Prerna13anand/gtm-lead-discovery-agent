@@ -8,7 +8,12 @@ title, description, location, department, employment type, and `posted_at`
 (spec §7.5, §7.7 both explicitly call for "ATS-native fields", not just
 JSON-LD's). Greenhouse, Lever, and Ashby each get their own extraction
 branch; JSON-LD (and any other/unknown platform) falls through to the
-original schema.org-shaped logic, unchanged.
+original schema.org-shaped logic, unchanged. Generic-HTML additionally gets
+its own location branch (`_parse_location_generic_html`) — its heuristic
+`location` field is a flat string, not schema.org's `jobLocation` key, so it
+would otherwise fall through unread; title/department/description happen to
+already use the same key names the schema.org-shaped default expects, so
+those don't need a dedicated branch.
 
 Only the *extraction* step is platform-aware. Title canonicalisation,
 function/seniority classification, description cleaning, and location
@@ -18,9 +23,11 @@ extraction step hands them, exactly as before.
 Phase 1 scope and simplifications still in force, called out explicitly
 rather than hidden:
     - Only structured (dict) payloads are normalised for real. A string
-      (HTML) payload — the generic-HTML adapter's eventual output — is
-      normalised into a maximally-degraded `JobPosting` rather than guessed
-      at.
+      payload (no real adapter produces one today, but the type is `dict |
+      str` — see `RawPosting`) is normalised into a maximally-degraded
+      `JobPosting` rather than guessed at. Generic-HTML's actual output is a
+      dict, handled by the normal path below with `is_degraded=True` forced
+      for that platform — see the comment on `_GENERIC_HTML_EXTRACTION_CONFIDENCE`.
     - Function/seniority classification (§7.3) is rules-only. Spec §7.3 also
       wants an LLM fallback for titles the rules can't resolve; that depends
       on `services.azure_openai`, which is a config-only stub in Phase 1 —
@@ -453,6 +460,40 @@ def _parse_location_ashby(
     return location_raw, locations, workplace_type, remote_scope
 
 
+def _parse_location_generic_html(
+    payload: dict[str, Any], description_text: str
+) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
+    """Generic-HTML's heuristic `location` field (`discovery.extraction.generic_html`)
+    is always a single best-effort string (comp/location text pulled from
+    whatever nearby element looked location-shaped) — the same flat shape as
+    Greenhouse's `location.name` after unwrapping, not a nested schema.org
+    `Place`, so the same single-string handling applies directly. Without
+    this branch, `_parse_location` fell through to the schema.org path
+    below, which reads `jobLocation` — a key this adapter never sets — so
+    every generic-HTML posting's location was silently dropped.
+    """
+    value = payload.get("location")
+    location_raw = value if isinstance(value, str) and value else None
+
+    locations: list[Location] = []
+    if location_raw:
+        is_remote = bool(re.search(r"\bremote\b", location_raw, re.I))
+        locations = [Location(raw=location_raw, is_remote=is_remote)]
+
+    workplace_type: WorkplaceType | None = None
+    if location_raw:
+        if re.search(r"\bremote\b", location_raw, re.I):
+            workplace_type = WorkplaceType.REMOTE
+        elif re.search(r"\bhybrid\b", location_raw, re.I):
+            workplace_type = WorkplaceType.HYBRID
+    workplace_type = _resolve_hybrid_override(workplace_type, description_text)
+
+    remote_scope = _extract_remote_scope(location_raw)
+    _apply_remote_flag(locations, workplace_type, remote_scope)
+
+    return location_raw, locations, workplace_type, remote_scope
+
+
 def _parse_location(
     platform: str, payload: dict[str, Any], description_text: str
 ) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
@@ -462,6 +503,8 @@ def _parse_location(
         return _parse_location_lever(payload, description_text)
     if platform == AtsPlatform.ASHBY:
         return _parse_location_ashby(payload, description_text)
+    if platform == AtsPlatform.GENERIC_HTML:
+        return _parse_location_generic_html(payload, description_text)
     return _parse_location_schema_org(payload, description_text)
 
 
@@ -664,6 +707,30 @@ def _degraded_posting(raw: RawPosting) -> JobPosting:
     )
 
 
+# Spec §6.2.4: generic-HTML output is "low-confidence by construction" and
+# must not "masquerade as authoritative" — every posting from this platform
+# is marked degraded here, regardless of hydration state (hydration only
+# adds a description; it doesn't make the heuristic title/location/URL
+# extraction any more trustworthy). Matches `_degraded_posting`'s low-
+# confidence convention below and the 0.3 "no rules match" confidence
+# `_classify_function`/`_classify_seniority` already use elsewhere in this
+# file as this codebase's established "low but not zero" value — zero would
+# be wrong here since, unlike the unstructured-string case `_degraded_posting`
+# handles, real structured fields (title, sometimes location) were extracted.
+#
+# `RenderedDomAdapter`'s DOM-link fallback (`discovery.extraction.rendered_dom`)
+# has the identical problem in principle — it's also `parse_degraded` — but
+# is deliberately NOT included here: its `RawPosting.source_platform` is the
+# same `"rendered_dom"` value used by its non-degraded learned-endpoint
+# success path, and `RawPosting` carries no other field that distinguishes
+# the two at normalisation time. Guessing at a proxy (e.g. treating a missing
+# `source_job_id` as "degraded") would misclassify learned-endpoint postings
+# that simply lack an ID key. Fixing that correctly needs a signal added to
+# `RawPosting` itself — out of scope here per the project's stated principle
+# of documenting a discrepancy rather than inventing behavior around it.
+_GENERIC_HTML_EXTRACTION_CONFIDENCE = 0.3
+
+
 def normalize(raw: RawPosting) -> JobPosting:
     """`RawPosting` -> `JobPosting`. See module docstring for Phase 1 scope."""
     if not isinstance(raw.raw_payload, dict):
@@ -671,6 +738,7 @@ def normalize(raw: RawPosting) -> JobPosting:
 
     payload = raw.raw_payload
     platform = raw.source_platform
+    is_degraded = platform == AtsPlatform.GENERIC_HTML
 
     title_raw = _extract_title(platform, payload)
     title_canonical = _canonicalize_title(title_raw)
@@ -723,8 +791,10 @@ def normalize(raw: RawPosting) -> JobPosting:
         first_seen_at=raw.fetched_at,
         last_seen_at=raw.fetched_at,
         field_provenance=field_provenance,
-        extraction_confidence=1.0 if raw.is_hydrated else 0.7,
-        is_degraded=False,
+        extraction_confidence=(
+            _GENERIC_HTML_EXTRACTION_CONFIDENCE if is_degraded else (1.0 if raw.is_hydrated else 0.7)
+        ),
+        is_degraded=is_degraded,
     )
 
 

@@ -41,9 +41,9 @@ nuance, on the principle that the spec's own wording is the contract:
       everywhere else), not "success-or-degraded". `parse_degraded` is its
       own distinct terminal status in this ledger (see `ScrapeRunStatus`),
       never a variant of `success`.
-    Neither choice currently changes any real output: `parse_degraded` isn't
-    reachable yet (the generic-HTML adapter that would produce it is a
-    Phase 2 placeholder), so the degraded-rate numerator is always 0 today.
+    Both choices were made before the generic-HTML and rendered-DOM adapters
+    existed to actually produce a `parse_degraded` run; now that they do,
+    the distinction is live, not just principled.
 """
 
 from __future__ import annotations

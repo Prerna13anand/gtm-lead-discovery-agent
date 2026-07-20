@@ -6,10 +6,16 @@ token needed to call its API.
 Phase 1 implements detection signals 1-4 (URL host match, redirect target,
 embedded script/iframe, DOM markers) for Greenhouse, Lever, and Ashby.
 
-NOT implemented in Phase 1 (left as TODOs):
-    - Signal 5, network-request inspection during Playwright rendering —
-      depends on the rendered-DOM adapter, which doesn't exist until Phase 2.
+NOT implemented (left as a TODO):
     - Signal 6, DNS/CNAME lookups for white-labelled boards.
+
+Signal 5 (network-request inspection during Playwright rendering) is
+implemented, but not here — it happens as part of the rendered-DOM adapter's
+own render step (`discovery.extraction.rendered_dom`), since that's the only
+place a render actually occurs. What lives here is the *routing* check that
+decides a company needs rendering at all (`has_job_like_content` /
+`has_spa_root_or_ats_embed`, used by `route_extraction`), not the rendering
+itself.
 
 Board-token extraction (spec §5.2) lives in `discovery.ats_platforms` — shared
 with Stage 3, since an ATS-API adapter needs to be able to resolve the same
@@ -20,6 +26,7 @@ current vendor URL formats before relying on a new platform's pattern.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -38,6 +45,48 @@ from gtm_agent.models.careers_source import CareersSource
 from gtm_agent.models.results import AtsFingerprintStatus, StageResult
 
 logger = get_logger(__name__)
+
+# Shared with discovery.extraction.rendered_dom — both the routing check
+# here and that adapter's own DOM-link fallback need the same notion of
+# "this looks like a job posting link".
+JOB_LIKE_LINK_RE = re.compile(r"/(?:jobs?|careers?|positions?|openings?)/[\w-]{3,}", re.I)
+
+# Live-verified refinement: a real careers page's *own* static assets are
+# frequently served from a path under the same prefix this pattern matches
+# — e.g. `/careers/icons/caret-down.svg` — which would otherwise
+# false-positive as a job link. Job posting URLs essentially never carry a
+# file extension; asset paths essentially always do.
+_ASSET_EXTENSION_RE = re.compile(
+    r"\.(?:svg|png|jpe?g|gif|ico|css|js|mjs|woff2?|ttf|eot|webp|avif|json|map)(?:[?#]|$)", re.I
+)
+
+
+def is_job_like_href(href: str) -> bool:
+    """Spec §6.2.3 / §6.2.4: does this href look like a link to a specific
+    job posting? Shared by the routing check below and
+    `discovery.extraction.rendered_dom`'s DOM-link fallback.
+    """
+    if not JOB_LIKE_LINK_RE.search(href):
+        return False
+    return not _ASSET_EXTENSION_RE.search(href)
+
+
+# Common SPA mount-point markers (spec §6.2.3 detection: "a known SPA
+# root"). Not exhaustive — a pragmatic, documented set covering the major
+# frameworks (React's conventional #root, Next.js Pages Router's #__next,
+# Gatsby's #___gatsby), not a claim of completeness.
+_SPA_ROOT_SELECTORS = ("#root", "#app", "#__next", "#___gatsby")
+
+# Live-verified gap in the selector list above, found while validating this
+# adapter (see discovery/extraction/rendered_dom.py's module docstring): a
+# real Next.js *App Router* site (React Server Components) carries none of
+# those conventional single-mount-point ids — verified directly against its
+# static HTML. What it does carry is React's own Suspense/streaming
+# boundary marker, `<!--$-->`, which is part of the React/RSC wire protocol
+# itself, not something specific to one site or a guess — present on any
+# page using a Suspense boundary during server rendering, which any
+# React-Server-Components page with client-hydrated sections will have.
+_RSC_SUSPENSE_MARKER = "<!--$-->"
 
 _CONFIDENCE_URL_HOST_MATCH = 0.98
 _CONFIDENCE_REDIRECT_TARGET = 0.95
@@ -130,9 +179,14 @@ async def identify_ats(
                 )
                 return StageResult(status=AtsFingerprintStatus.IDENTIFIED, value=identification)
 
-    # TODO(phase 2): Signal 5 — inspect XHR/fetch targets during Playwright
-    # rendering. Catches JS-injected boards with no static markers.
-    # TODO(phase 2): Signal 6 — DNS/CNAME lookup for white-labelled boards.
+    # TODO(later phase): Signal 5 — feed a rendered-DOM adapter's captured
+    # XHR targets back into Stage 2 to catch JS-injected boards that turn
+    # out to be a *known* ATS with no static markers. The rendered-DOM
+    # adapter (discovery.extraction.rendered_dom) already captures and
+    # inspects XHR/fetch responses for its own purpose (spec §6.2.3's
+    # endpoint-learning), but feeding that back into this function would
+    # restructure Stage 2 into a two-pass flow — out of scope here.
+    # TODO(later phase): Signal 6 — DNS/CNAME lookup for white-labelled boards.
 
     logger.info("ats_unknown", company_id=source.company_id, url=source.careers_url)
     return StageResult(status=AtsFingerprintStatus.ATS_UNKNOWN, detail="no detection signal matched")
@@ -143,17 +197,52 @@ def has_jsonld_job_posting(html: str) -> bool:
     return 'application/ld+json' in html and "JobPosting" in html
 
 
+def has_job_like_content(html: str) -> bool:
+    """Cheap check used by routing (spec §6.2.3 detection): does the
+    *static* page already show job-detail-shaped links? If so, there's
+    nothing to render — a rendered-DOM escalation is for pages that show
+    none of this without JS. Checks actual `<a href>` values rather than
+    regex-scanning the raw HTML, so it isn't fooled by the pattern
+    appearing somewhere that isn't a link (script text, a comment, ...).
+    """
+    tree = HTMLParser(html)
+    for anchor in tree.css("a[href]"):
+        href = anchor.attributes.get("href") or ""
+        if is_job_like_href(href):
+            return True
+    return False
+
+
+def has_spa_root_or_ats_embed(html: str) -> bool:
+    """Cheap check used by routing (spec §6.2.3 detection): a known SPA
+    mount-point marker, or a known ATS embed script/iframe (the same signal
+    Signal 3, §5.1, already looks for) — both suggest real content exists
+    but needs JS execution to appear, as opposed to a page with genuinely
+    nothing to show.
+    """
+    tree = HTMLParser(html)
+    for selector in _SPA_ROOT_SELECTORS:
+        if tree.css_first(selector) is not None:
+            return True
+    if _RSC_SUSPENSE_MARKER in html:
+        return True
+    for tag in ("script", "iframe"):
+        for node in tree.css(f"{tag}[src]"):
+            src = node.attributes.get("src") or ""
+            if known_ats_platform_for_embed_src(src) is not None:
+                return True
+    return False
+
+
 def route_extraction(identification: AtsIdentification | None, page_html: str | None = None) -> AtsPlatform:
     """Decide which adapter family should handle extraction — spec §5.3.
 
     `identification` is None when Stage 2 didn't identify a platform at all
-    (`ats_unknown`) — routing then falls through to the JSON-LD check and
-    finally the generic-HTML terminal fallback.
+    (`ats_unknown`) — routing then falls through to the JSON-LD check, then
+    the rendered-DOM check, and finally the generic-HTML terminal fallback.
 
     `page_html` is the already-fetched careers page body, if available, used
-    for the JSON-LD check. Rendered-DOM routing is not reachable in Phase 1
-    (no Playwright adapter exists yet) — the routing decision is still made
-    here so Phase 2 only has to add the adapter, not the branch.
+    for both the JSON-LD check and the rendered-DOM escalation check.
     """
     if identification is not None and identification.platform in (
         AtsPlatform.GREENHOUSE,
@@ -170,7 +259,7 @@ def route_extraction(identification: AtsIdentification | None, page_html: str | 
     if page_html is not None and has_jsonld_job_posting(page_html):
         return AtsPlatform.JSONLD
 
-    # TODO(phase 2): route to AtsPlatform.RENDERED_DOM when static fetch shows
-    # no job-like content but a known SPA root or ATS embed script is present.
+    if page_html is not None and not has_job_like_content(page_html) and has_spa_root_or_ats_embed(page_html):
+        return AtsPlatform.RENDERED_DOM
 
     return AtsPlatform.GENERIC_HTML

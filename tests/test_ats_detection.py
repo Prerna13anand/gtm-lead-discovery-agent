@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 import pytest
 
 from gtm_agent.discovery.ats_detection import (
+    has_job_like_content,
     has_jsonld_job_posting,
+    has_spa_root_or_ats_embed,
     identify_ats,
     route_extraction,
 )
@@ -122,3 +124,65 @@ def test_route_extraction_falls_back_to_jsonld_when_no_ats_identified():
 
 def test_route_extraction_falls_back_to_generic_html_as_terminal_case():
     assert route_extraction(None, page_html="<html></html>") == AtsPlatform.GENERIC_HTML
+
+
+# --- Rendered-DOM routing (spec §6.2.3 detection) ---
+
+
+def test_has_job_like_content_detects_job_and_career_link_patterns():
+    assert has_job_like_content('<a href="/jobs/senior-engineer">Apply</a>') is True
+    assert has_job_like_content('<a href="/careers/gtm-engineer--sf">Apply</a>') is True
+    assert has_job_like_content('<a href="/positions/123-abc">Apply</a>') is True
+    assert has_job_like_content("<html><body>Nothing here</body></html>") is False
+
+
+def test_has_job_like_content_ignores_static_assets_under_the_same_prefix():
+    # Live-verified false positive: a page's own icon/image assets can live
+    # under a /careers/... path, which must not be mistaken for a job link.
+    assert has_job_like_content('<a href="/careers/icons/caret-down.svg">x</a>') is False
+    assert has_job_like_content('<img src="/careers/icons/caret-down.svg">') is False
+
+
+def test_has_spa_root_or_ats_embed_detects_known_spa_roots():
+    assert has_spa_root_or_ats_embed('<div id="root"></div>') is True
+    assert has_spa_root_or_ats_embed('<div id="__next"></div>') is True
+    assert has_spa_root_or_ats_embed('<div id="___gatsby"></div>') is True
+    assert has_spa_root_or_ats_embed("<html><body>plain page</body></html>") is False
+
+
+def test_has_spa_root_or_ats_embed_detects_known_ats_embed_script():
+    html = '<script src="https://boards.greenhouse.io/embed/job_board/js?for=acme"></script>'
+    assert has_spa_root_or_ats_embed(html) is True
+
+
+def test_has_spa_root_or_ats_embed_detects_rsc_suspense_marker():
+    # Live-verified gap fix: a Next.js App Router page carries no
+    # conventional #__next mount point, only React's own Suspense/streaming
+    # marker — see ats_detection.py's _RSC_SUSPENSE_MARKER comment.
+    html = '<html><body><div hidden=""><!--$--><!--/$--></div></body></html>'
+    assert has_spa_root_or_ats_embed(html) is True
+
+
+def test_route_extraction_escalates_to_rendered_dom_when_no_job_content_but_spa_root_present():
+    html = '<html><body><div id="__next"></div></body></html>'
+    assert route_extraction(None, page_html=html) == AtsPlatform.RENDERED_DOM
+
+
+def test_route_extraction_prefers_generic_html_when_no_spa_signal_either():
+    html = "<html><body>A totally static, empty page.</body></html>"
+    assert route_extraction(None, page_html=html) == AtsPlatform.GENERIC_HTML
+
+
+def test_route_extraction_does_not_escalate_when_job_content_already_present():
+    # A SPA-root marker is present, but so is a real job link — no need to render.
+    html = '<html><body><div id="__next"></div><a href="/jobs/engineer">Engineer</a></body></html>'
+    assert route_extraction(None, page_html=html) == AtsPlatform.GENERIC_HTML
+
+
+def test_route_extraction_prefers_jsonld_over_rendered_dom():
+    # Both signals present — JSON-LD is cheaper and already tried first.
+    html = (
+        '<div id="__next"></div>'
+        '<script type="application/ld+json">{"@type": "JobPosting"}</script>'
+    )
+    assert route_extraction(None, page_html=html) == AtsPlatform.JSONLD
