@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
 
+    # --- scrape_run ledger (spec §15.1) — no database yet, so this is a local file ---
+    scrape_run_ledger_path: str = ".data/scrape_runs.jsonl"
+    raw_payload_archive_dir: str = ".data/raw_payloads"
+
     @property
     def azure_openai_configured(self) -> bool:
         """Whether enough Azure OpenAI config is present to initialise a client.

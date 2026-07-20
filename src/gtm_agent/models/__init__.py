@@ -17,6 +17,7 @@ from gtm_agent.models.results import (
     SourceResolutionStatus,
     StageResult,
 )
+from gtm_agent.models.scrape_run import ScrapeRun, ScrapeRunStatus
 
 __all__ = [
     "AtsFingerprintStatus",
@@ -34,6 +35,8 @@ __all__ = [
     "Provenance",
     "RawPosting",
     "ResolutionStrategy",
+    "ScrapeRun",
+    "ScrapeRunStatus",
     "Seniority",
     "SourceResolutionStatus",
     "StageResult",

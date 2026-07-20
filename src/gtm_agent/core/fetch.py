@@ -62,6 +62,7 @@ class Fetcher:
         *,
         max_retries: int = 3,
         backoff_base_seconds: float = 0.5,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         settings = get_settings()
         self._max_retries = max_retries
@@ -71,7 +72,16 @@ class Fetcher:
             timeout=httpx.Timeout(settings.http_timeout_seconds),
             headers={"User-Agent": settings.http_user_agent},
             follow_redirects=True,
+            transport=transport,
         )
+
+        # Per-run request/byte counters — spec §15.1's `scrape_run.http_requests_made`
+        # and `.bytes_fetched`. A caller building a scrape_run ledger entry
+        # snapshots these before and after a company's attempt and records the
+        # delta; see core/run_ledger.py. Counts every attempt made over the
+        # wire, including retries, since each is a real request sent.
+        self.request_count = 0
+        self.bytes_fetched = 0
 
     async def __aenter__(self) -> Fetcher:
         return self
@@ -103,11 +113,15 @@ class Fetcher:
             try:
                 response = await self._client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
+                self.request_count += 1  # a request was sent, even though it failed at the transport level
                 last_exc = exc
                 if attempt >= self._max_retries:
                     break
                 await self._sleep_backoff(attempt)
                 continue
+
+            self.request_count += 1
+            self.bytes_fetched += len(response.content)
 
             if response.status_code in _NON_RETRYABLE_STATUS_CODES:
                 return FetchResult(
