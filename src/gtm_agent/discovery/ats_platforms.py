@@ -10,6 +10,8 @@ documentation before Phase 2 implementation. This module holds detection
 domains only, not endpoint shapes.
 """
 
+import re
+
 from gtm_agent.models.ats import AtsPlatform
 
 # Host suffixes that identify a known ATS. A match is a decisive detection
@@ -60,3 +62,31 @@ def known_ats_platform_for_embed_src(src: str) -> AtsPlatform | None:
         if any(fragment in src_lower for fragment in fragments):
             return platform
     return None
+
+
+# Board-token extraction — spec §5.2. Starting map only; verify before relying
+# on a new platform's pattern for real API calls.
+#
+# Public and shared (moved here from Stage 2 in Phase 2A) so that an ATS-API
+# adapter (Stage 3) can resolve its own board token straight from a
+# `CareersSource.careers_url` when that URL already points at the ATS domain
+# — the common case, since Stage 1's homepage-link strategy often resolves
+# directly to an ATS link. `ats_detection.identify_ats` (Stage 2) uses the
+# same patterns; keeping one copy avoids the two stages drifting apart.
+BOARD_TOKEN_PATTERNS: dict[AtsPlatform, re.Pattern[str]] = {
+    AtsPlatform.GREENHOUSE: re.compile(
+        r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board(?:/js)?\?for=)?([\w-]+)",
+        re.I,
+    ),
+    AtsPlatform.LEVER: re.compile(r"jobs\.lever\.co/([\w-]+)", re.I),
+    AtsPlatform.ASHBY: re.compile(r"(?:jobs|embed)\.ashbyhq\.com/([\w-]+)", re.I),
+}
+
+
+def extract_board_token(platform: AtsPlatform, text: str) -> str | None:
+    """Extract a board token from a URL or embed src for the given platform."""
+    pattern = BOARD_TOKEN_PATTERNS.get(platform)
+    if pattern is None:
+        return None
+    match = pattern.search(text)
+    return match.group(1) if match else None

@@ -39,6 +39,14 @@ class ExtractionStatus(StrEnum):
     RENDER_TIMEOUT = "render_timeout"
     PARTIAL = "partial"
     NOT_IMPLEMENTED = "not_implemented"  # Phase 1 placeholder adapters — see discovery/extraction
+    BOARD_NOT_FOUND = "board_not_found"
+    """The ATS API rejected the board token (404), or an adapter couldn't
+    resolve a board token for the source at all. Distinct from
+    `SCHEMA_VIOLATION` (a board we *could* reach returned an unexpected
+    shape) and from `BLOCKED_403` (a board we know exists but were denied) —
+    this is "there is no board here," which is closest to `no_careers_page`
+    in spirit but discovered one stage later, at extraction time (spec §2.3:
+    never collapse "we don't know" into "no jobs")."""
 
 
 T = TypeVar("T")

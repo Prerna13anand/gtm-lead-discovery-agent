@@ -11,14 +11,15 @@ NOT implemented in Phase 1 (left as TODOs):
       depends on the rendered-DOM adapter, which doesn't exist until Phase 2.
     - Signal 6, DNS/CNAME lookups for white-labelled boards.
 
-Board-token extraction regexes below are a starting point per Appendix A and
-must be verified against current vendor URL formats before Phase 2 relies on
-them for real API calls.
+Board-token extraction (spec §5.2) lives in `discovery.ats_platforms` — shared
+with Stage 3, since an ATS-API adapter needs to be able to resolve the same
+token from a `CareersSource.careers_url` directly (see
+`discovery.extraction.greenhouse` for why). Starting map only; verify against
+current vendor URL formats before relying on a new platform's pattern.
 """
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -28,6 +29,7 @@ from gtm_agent.core.fetch import FetchError, Fetcher
 from gtm_agent.core.logging import get_logger
 from gtm_agent.discovery.ats_platforms import (
     ATS_DOM_MARKERS,
+    extract_board_token,
     known_ats_platform_for_embed_src,
     known_ats_platform_for_host,
 )
@@ -37,30 +39,12 @@ from gtm_agent.models.results import AtsFingerprintStatus, StageResult
 
 logger = get_logger(__name__)
 
-# Board-token extraction — spec §5.2. Starting map only; verify before Phase 2 build.
-_BOARD_TOKEN_PATTERNS: dict[AtsPlatform, re.Pattern[str]] = {
-    AtsPlatform.GREENHOUSE: re.compile(
-        r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board(?:/js)?\?for=)?([\w-]+)",
-        re.I,
-    ),
-    AtsPlatform.LEVER: re.compile(r"jobs\.lever\.co/([\w-]+)", re.I),
-    AtsPlatform.ASHBY: re.compile(r"(?:jobs|embed)\.ashbyhq\.com/([\w-]+)", re.I),
-}
-
 _CONFIDENCE_URL_HOST_MATCH = 0.98
 _CONFIDENCE_REDIRECT_TARGET = 0.95
 _CONFIDENCE_EMBED_SIGNAL = 0.90
 _CONFIDENCE_DOM_MARKER = 0.75
 
 _ADAPTER_ROUTING_CONFIDENCE_FLOOR = 0.8  # spec §5.3
-
-
-def _extract_board_token(platform: AtsPlatform, text: str) -> str | None:
-    pattern = _BOARD_TOKEN_PATTERNS.get(platform)
-    if pattern is None:
-        return None
-    match = pattern.search(text)
-    return match.group(1) if match else None
 
 
 async def identify_ats(
@@ -74,7 +58,7 @@ async def identify_ats(
     parsed = urlparse(source.careers_url)
     platform = known_ats_platform_for_host(parsed.netloc)
     if platform is not None:
-        token = _extract_board_token(platform, source.careers_url)
+        token = extract_board_token(platform, source.careers_url)
         identification = AtsIdentification(
             company_id=source.company_id,
             platform=platform,
@@ -98,7 +82,7 @@ async def identify_ats(
     if final_host != parsed.netloc:
         platform = known_ats_platform_for_host(final_host)
         if platform is not None:
-            token = _extract_board_token(platform, result.url)
+            token = extract_board_token(platform, result.url)
             identification = AtsIdentification(
                 company_id=source.company_id,
                 platform=platform,
@@ -118,7 +102,7 @@ async def identify_ats(
             src = node.attributes.get("src") or ""
             platform = known_ats_platform_for_embed_src(src)
             if platform is not None:
-                token = _extract_board_token(platform, src)
+                token = extract_board_token(platform, src)
                 identification = AtsIdentification(
                     company_id=source.company_id,
                     platform=platform,

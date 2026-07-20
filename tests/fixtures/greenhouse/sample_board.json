@@ -1,0 +1,37 @@
+{
+  "jobs": [
+    {
+      "id": 1111111,
+      "internal_job_id": 2222222,
+      "title": "Senior Backend Engineer",
+      "updated_at": "2026-06-01T10:00:00-04:00",
+      "location": { "name": "Remote, US" },
+      "content": "&lt;div&gt;&lt;p&gt;We build things.&lt;/p&gt;&lt;ul&gt;&lt;li&gt;5+ years experience&lt;/li&gt;&lt;/ul&gt;&lt;/div&gt;",
+      "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/1111111",
+      "requisition_id": "REQ-100",
+      "departments": [
+        { "id": 10, "name": "Engineering", "child_ids": [], "parent_id": null }
+      ],
+      "offices": [
+        { "id": 20, "name": "Remote", "location": null, "child_ids": [], "parent_id": null }
+      ],
+      "first_published": "2026-05-15T00:00:00-04:00",
+      "data_compliance": [{ "type": "gdpr", "requires_consent": false }]
+    },
+    {
+      "id": 3333333,
+      "title": "Founding Design Lead",
+      "updated_at": "2026-06-02T10:00:00-04:00",
+      "location": { "name": "San Francisco, CA" },
+      "content": "&lt;p&gt;Own design end to end.&lt;/p&gt;",
+      "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/3333333",
+      "requisition_id": null,
+      "departments": [
+        { "id": 11, "name": "Design", "child_ids": [], "parent_id": null }
+      ],
+      "offices": [],
+      "first_published": "2026-05-20T00:00:00-04:00"
+    }
+  ],
+  "meta": { "total": 2 }
+}
