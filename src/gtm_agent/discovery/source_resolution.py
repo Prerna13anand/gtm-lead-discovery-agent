@@ -9,9 +9,12 @@ Phase 1 implements the resolution ladder's strategies A, B, and E:
     E — manual override (handled directly in `resolve_source`, since it
         short-circuits the entire ladder rather than being one more rung)
 
-Strategies C (sitemap.xml) and D (Tavily search fallback) are registered as
-placeholders that always decline (return `None`) — real implementations are
-later-phase work.
+Phase 2 adds:
+    C — sitemap.xml (`SitemapStrategy`)
+
+Strategy D (Tavily search fallback) remains a placeholder that always
+declines (returns `None`) — it depends on `services.tavily`, which is a stub
+until that later-phase work lands.
 """
 
 from __future__ import annotations
@@ -58,6 +61,12 @@ _CONVENTIONAL_PATHS = (
 )
 _PATH_PROBE_DELAY_SECONDS = 0.5  # placeholder politeness gap; real rate limiting is a fetch-layer TODO (§16.3)
 
+# --- Strategy C sitemap.xml (spec §4.1) ---
+_SITEMAP_PATH = "/sitemap.xml"
+_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.I | re.S)
+_SITEMAP_INDEX_MARKER_RE = re.compile(r"<sitemapindex[\s>]", re.I)
+_MAX_SITEMAP_INDEX_ENTRIES = 10  # bound on child-sitemap fetches; not spec-mandated, kept cheap per §2.5
+
 # --- Validation markers (spec §4.2) ---
 _CAREERS_COPY_RE = re.compile(r"open positions|join our team|current openings", re.I)
 _JOB_DETAIL_HREF_RE = re.compile(r"/jobs?/[\w-]+", re.I)
@@ -67,6 +76,7 @@ _MIN_JOB_LIKE_LINKS = 3
 _CONFIDENCE_HOMEPAGE_ATS = 0.95
 _CONFIDENCE_HOMEPAGE_OWN_DOMAIN = 0.85
 _CONFIDENCE_PATH_PROBE = 0.75
+_CONFIDENCE_SITEMAP = 0.75
 _CONFIDENCE_FLOOR = 0.50
 
 
@@ -262,13 +272,58 @@ class PathProbeStrategy:
 
 
 class SitemapStrategy:
-    """Strategy C (spec §4.1) — NOT IMPLEMENTED in Phase 1. Always declines."""
+    """Strategy C (spec §4.1). Fetch /sitemap.xml (and any sitemap index it
+    points to), filter for careers-like paths. Effective on marketing sites
+    built with static generators; cheap and high-precision when present.
+    """
 
     strategy = ResolutionStrategy.SITEMAP
 
     async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
-        logger.debug("sitemap_strategy_not_implemented", domain=company.domain)
-        return None
+        sitemap_url = f"https://{company.domain}{_SITEMAP_PATH}"
+        try:
+            result = await fetcher.get(sitemap_url)
+        except FetchError:
+            return None
+
+        if result.status_code >= 400:
+            return None
+
+        locs = _LOC_RE.findall(result.text)
+        if not locs:
+            return None
+
+        if _SITEMAP_INDEX_MARKER_RE.search(result.text):
+            locs = await _urls_from_sitemap_index(locs, fetcher)
+
+        careers_url = next((loc for loc in locs if _HREF_PATH_RE.search(urlparse(loc).path)), None)
+        if careers_url is None:
+            return None
+
+        validated = await _fetch_and_validate(careers_url, fetcher)
+        return ResolutionCandidate(
+            url=careers_url,
+            confidence=_CONFIDENCE_SITEMAP,
+            strategy=self.strategy,
+            validated=validated,
+        )
+
+
+async def _urls_from_sitemap_index(sitemap_locs: list[str], fetcher: Fetcher) -> list[str]:
+    """A sitemap index points to child sitemaps rather than pages directly
+    (spec §4.1 Strategy C: "and any sitemap index it points to"). Fetch a
+    bounded number of them, sequentially, and pool their <loc> entries.
+    """
+    urls: list[str] = []
+    for sitemap_url in sitemap_locs[:_MAX_SITEMAP_INDEX_ENTRIES]:
+        try:
+            result = await fetcher.get(sitemap_url)
+        except FetchError:
+            continue
+        if result.status_code >= 400:
+            continue
+        urls.extend(_LOC_RE.findall(result.text))
+    return urls
 
 
 class TavilySearchStrategy:
