@@ -113,6 +113,9 @@ class Fetcher:
     async def head(self, url: str, **kwargs: object) -> FetchResult:
         return await self._request("HEAD", url, **kwargs)
 
+    async def post(self, url: str, **kwargs: object) -> FetchResult:
+        return await self._request("POST", url, **kwargs)
+
     async def _request(self, method: str, url: str, **kwargs: object) -> FetchResult:
         # TODO(phase 2): consult robots.txt cache before issuing the request (spec §21.1)
         # TODO(phase 2): acquire a per-domain semaphore before issuing the request (spec §16.3)

@@ -1,25 +1,39 @@
-"""Tavily service — placeholder interface only.
+"""Tavily service.
 
 Used by two different stages, at different phases:
     - Stage 1, Strategy D — a domain-restricted then unrestricted careers-page
-      search fallback (spec §4.1 Strategy D). Referenced by
-      `discovery.source_resolution.TavilySearchStrategy`, itself a Phase 1
-      placeholder that always declines.
+      search fallback (spec §4.1 Strategy D). `search()` is implemented in
+      Phase 2 for this caller: `discovery.source_resolution.TavilySearchStrategy`.
     - Stage 9, Company Context — funding/hiring/news summary, once per company,
       cached ~7 days (spec §12). Not implemented until Phase 3.
 
-No API calls in Phase 1.
+`search()`'s request/response shape follows Tavily's public Search API as
+documented at integration time. Per this codebase's existing convention for
+third-party APIs (spec §5.3's build note on Appendix A), treat it as a
+starting point and verify against current Tavily API docs before relying on
+it in production — it has not been exercised against the live API here.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from gtm_agent.config import get_settings
+from gtm_agent.core.fetch import FetchError, Fetcher
+from gtm_agent.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+_SEARCH_URL = "https://api.tavily.com/search"
 
 
 class TavilyNotConfiguredError(Exception):
     pass
+
+
+class TavilySearchError(Exception):
+    """Raised when a Tavily search request fails or returns an unusable response."""
 
 
 class TavilyClient:
@@ -30,9 +44,40 @@ class TavilyClient:
     def is_configured(self) -> bool:
         return bool(self._settings.tavily_api_key)
 
-    async def search(self, query: str, *, restrict_domain: str | None = None) -> list[dict[str, Any]]:
-        """Generic search — backs both the Stage 1 fallback and Stage 9 context queries."""
-        raise NotImplementedError("Tavily integration is not implemented until a later phase — see spec §4.1, §12")
+    async def search(
+        self,
+        query: str,
+        *,
+        fetcher: Fetcher,
+        restrict_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Generic search — backs both the Stage 1 fallback and Stage 9 context queries.
+
+        Routes through the shared `Fetcher` rather than a private HTTP client,
+        per this codebase's fetch-layer convention (`core.fetch` module docstring).
+        """
+        if not self.is_configured:
+            raise TavilyNotConfiguredError("TAVILY_API_KEY is not set")
+
+        payload: dict[str, Any] = {"api_key": self._settings.tavily_api_key, "query": query}
+        if restrict_domain:
+            payload["include_domains"] = [restrict_domain]
+
+        try:
+            result = await fetcher.post(_SEARCH_URL, json=payload)
+        except FetchError as exc:
+            raise TavilySearchError(f"Tavily search request failed: {exc}") from exc
+
+        if result.status_code >= 400:
+            raise TavilySearchError(f"Tavily search returned HTTP {result.status_code}")
+
+        try:
+            data = json.loads(result.text)
+        except json.JSONDecodeError as exc:
+            raise TavilySearchError(f"Tavily search returned invalid JSON: {exc}") from exc
+
+        results = data.get("results") if isinstance(data, dict) else None
+        return results if isinstance(results, list) else []
 
     async def get_company_context(self, *, company_domain: str, company_name: str) -> dict[str, Any] | None:
         """Stage 9 — spec §12. Funding, hiring/growth news, leadership changes."""

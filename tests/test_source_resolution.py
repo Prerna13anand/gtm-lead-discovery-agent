@@ -1,8 +1,9 @@
-"""Stage 1 Source Resolution tests — Strategy C (sitemap.xml), spec §4.1.
+"""Stage 1 Source Resolution tests — Strategies C (sitemap.xml) and D (Tavily
+search fallback), spec §4.1.
 
-Scoped to the sitemap strategy added in Phase 2. Strategies A, B, and E
-(Phase 1) are exercised only incidentally, via one integration test that
-confirms Strategy C is correctly wired into the resolution ladder.
+Scoped to the two strategies added in Phase 2. Strategies A, B, and E
+(Phase 1) are exercised only incidentally, via integration tests that confirm
+C and D are correctly wired into the resolution ladder.
 """
 
 from datetime import UTC, datetime
@@ -14,11 +15,13 @@ import pytest
 from gtm_agent.core.fetch import FetchError, FetchResult
 from gtm_agent.discovery.source_resolution import (
     SitemapStrategy,
+    TavilySearchStrategy,
     resolve_source,
 )
 from gtm_agent.models.careers_source import ResolutionStrategy
 from gtm_agent.models.company import Company
 from gtm_agent.models.results import SourceResolutionStatus
+from gtm_agent.services.tavily import TavilySearchError
 
 
 def _company(domain: str = "acme.com") -> Company:
@@ -216,3 +219,235 @@ async def test_resolve_source_falls_through_to_sitemap_when_earlier_strategies_d
     assert result.value.resolution_strategy == ResolutionStrategy.SITEMAP
     assert result.value.careers_url == "https://acme.com/opportunities"
     assert result.value.resolution_confidence == 0.75
+
+
+# --- Strategy D — Tavily search fallback (spec §4.1) ---
+
+_RESTRICTED_QUERY = '"Acme" careers open positions site:acme.com'
+_UNRESTRICTED_QUERY = '"Acme" jobs'
+
+
+class FakeTavilyClient:
+    """A test double for `TavilyClient` — `TavilySearchStrategy` is injected
+    with one directly, so these tests exercise the strategy's fallback
+    ordering and host-validation logic without going through real HTTP.
+    """
+
+    def __init__(
+        self,
+        configured: bool = True,
+        responses: dict[str, list[dict[str, object]]] | None = None,
+        raise_for: dict[str, Exception] | None = None,
+    ) -> None:
+        self._configured = configured
+        self.responses = responses or {}
+        self.raise_for = raise_for or {}
+        self.queries: list[tuple[str, str | None]] = []
+
+    @property
+    def is_configured(self) -> bool:
+        return self._configured
+
+    async def search(
+        self, query: str, *, fetcher: object, restrict_domain: str | None = None
+    ) -> list[dict[str, object]]:
+        self.queries.append((query, restrict_domain))
+        if query in self.raise_for:
+            raise self.raise_for[query]
+        return self.responses.get(query, [])
+
+
+async def test_tavily_not_configured_declines_without_searching() -> None:
+    tavily = FakeTavilyClient(configured=False)
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+
+    candidate = await strategy.attempt(_company(), FakeFetcher())
+
+    assert candidate is None
+    assert tavily.queries == []
+
+
+async def test_domain_restricted_result_resolves_at_0_60_confidence() -> None:
+    tavily = FakeTavilyClient(responses={_RESTRICTED_QUERY: [{"url": "https://acme.com/careers"}]})
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+    fetcher = FakeFetcher({"https://acme.com/careers": _result("https://acme.com/careers", 200, _CAREERS_PAGE_HTML)})
+
+    candidate = await strategy.attempt(_company(), fetcher)
+
+    assert candidate is not None
+    assert candidate.url == "https://acme.com/careers"
+    assert candidate.strategy == ResolutionStrategy.TAVILY_SEARCH
+    assert candidate.confidence == 0.60
+    assert candidate.validated is True
+    # domain-restricted query is tried first, with the site restriction passed through
+    assert tavily.queries == [(_RESTRICTED_QUERY, "acme.com")]
+
+
+async def test_falls_back_to_unrestricted_when_restricted_finds_nothing() -> None:
+    tavily = FakeTavilyClient(
+        responses={
+            _RESTRICTED_QUERY: [],
+            _UNRESTRICTED_QUERY: [{"url": "https://jobs.lever.co/acme"}],
+        }
+    )
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+    fetcher = FakeFetcher(
+        {"https://jobs.lever.co/acme": _result("https://jobs.lever.co/acme", 200, _CAREERS_PAGE_HTML)}
+    )
+
+    candidate = await strategy.attempt(_company(), fetcher)
+
+    assert candidate is not None
+    assert candidate.url == "https://jobs.lever.co/acme"
+    assert candidate.confidence == 0.40
+    assert tavily.queries == [(_RESTRICTED_QUERY, "acme.com"), (_UNRESTRICTED_QUERY, None)]
+
+
+async def test_unrestricted_result_on_unknown_host_is_rejected() -> None:
+    # spec §4.1: an unrestricted result must be validated against the known
+    # company domain or ATS domain list — an aggregator page must not be accepted.
+    tavily = FakeTavilyClient(
+        responses={
+            _RESTRICTED_QUERY: [],
+            _UNRESTRICTED_QUERY: [{"url": "https://some-job-aggregator.example/acme-inc-jobs"}],
+        }
+    )
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+
+    candidate = await strategy.attempt(_company(), FakeFetcher())
+
+    assert candidate is None
+
+
+async def test_unrestricted_result_on_company_subdomain_is_accepted() -> None:
+    tavily = FakeTavilyClient(
+        responses={
+            _RESTRICTED_QUERY: [],
+            _UNRESTRICTED_QUERY: [{"url": "https://careers.acme.com/openings"}],
+        }
+    )
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+    fetcher = FakeFetcher(
+        {"https://careers.acme.com/openings": _result("https://careers.acme.com/openings", 200, _CAREERS_PAGE_HTML)}
+    )
+
+    candidate = await strategy.attempt(_company(), fetcher)
+
+    assert candidate is not None
+    assert candidate.url == "https://careers.acme.com/openings"
+
+
+async def test_unrestricted_result_on_known_ats_domain_is_accepted() -> None:
+    tavily = FakeTavilyClient(
+        responses={
+            _RESTRICTED_QUERY: [],
+            _UNRESTRICTED_QUERY: [
+                {"url": "https://some-job-aggregator.example/acme-inc-jobs"},  # skipped: unknown host
+                {"url": "https://boards.greenhouse.io/acme"},  # accepted: known ATS domain
+            ],
+        }
+    )
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+    fetcher = FakeFetcher(
+        {"https://boards.greenhouse.io/acme": _result("https://boards.greenhouse.io/acme", 200, _CAREERS_PAGE_HTML)}
+    )
+
+    candidate = await strategy.attempt(_company(), fetcher)
+
+    assert candidate is not None
+    assert candidate.url == "https://boards.greenhouse.io/acme"
+
+
+async def test_match_failing_page_validation_is_returned_unvalidated() -> None:
+    tavily = FakeTavilyClient(responses={_RESTRICTED_QUERY: [{"url": "https://acme.com/careers"}]})
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+    fetcher = FakeFetcher({"https://acme.com/careers": _result("https://acme.com/careers", 200, _PLAIN_PAGE_HTML)})
+
+    candidate = await strategy.attempt(_company(), fetcher)
+
+    assert candidate is not None
+    assert candidate.validated is False
+
+
+async def test_search_error_on_restricted_query_falls_back_to_unrestricted() -> None:
+    # Only TavilyNotConfiguredError/TavilySearchError are caught by attempt() —
+    # simulate the kind of failure search() actually raises.
+    tavily = FakeTavilyClient(
+        raise_for={_RESTRICTED_QUERY: TavilySearchError("simulated Tavily outage")},
+        responses={_UNRESTRICTED_QUERY: [{"url": "https://jobs.lever.co/acme"}]},
+    )
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+    fetcher = FakeFetcher(
+        {"https://jobs.lever.co/acme": _result("https://jobs.lever.co/acme", 200, _CAREERS_PAGE_HTML)}
+    )
+
+    candidate = await strategy.attempt(_company(), fetcher)
+
+    assert candidate is not None
+    assert candidate.url == "https://jobs.lever.co/acme"
+    assert candidate.confidence == 0.40
+
+
+async def test_search_error_on_both_queries_declines() -> None:
+    tavily = FakeTavilyClient(
+        raise_for={
+            _RESTRICTED_QUERY: TavilySearchError("simulated outage"),
+            _UNRESTRICTED_QUERY: TavilySearchError("simulated outage"),
+        }
+    )
+    strategy = TavilySearchStrategy(tavily_client=tavily)
+
+    candidate = await strategy.attempt(_company(), FakeFetcher())
+
+    assert candidate is None
+
+
+async def test_low_confidence_unrestricted_match_needs_review_through_resolve_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Full-ladder integration: A/B/C all decline, D resolves via the
+    # unrestricted path (0.40 confidence) — resolve_source's existing
+    # confidence-floor check must route this to NEEDS_REVIEW without any
+    # Strategy-D-specific handling.
+    monkeypatch.setattr(
+        "gtm_agent.discovery.source_resolution.asyncio.sleep", AsyncMock(return_value=None)
+    )
+
+    import gtm_agent.discovery.source_resolution as source_resolution
+
+    fake_tavily_strategy = TavilySearchStrategy(
+        tavily_client=FakeTavilyClient(
+            responses={
+                _RESTRICTED_QUERY: [],
+                _UNRESTRICTED_QUERY: [{"url": "https://jobs.lever.co/acme"}],
+            }
+        )
+    )
+    # _STRATEGY_LADDER holds already-constructed strategy instances (built at
+    # import time), so patching the TavilySearchStrategy class wouldn't reach
+    # the one resolve_source() actually iterates over — replace the ladder entry directly.
+    monkeypatch.setattr(
+        source_resolution,
+        "_STRATEGY_LADDER",
+        (
+            source_resolution.HomepageLinkStrategy(),
+            source_resolution.PathProbeStrategy(),
+            source_resolution.SitemapStrategy(),
+            fake_tavily_strategy,
+        ),
+    )
+
+    fetcher = FakeFetcher(
+        {
+            "https://acme.com": _result("https://acme.com", 200, "<html><body>Hello</body></html>"),
+            "https://acme.com/sitemap.xml": _result("https://acme.com/sitemap.xml", 404, ""),
+            "https://jobs.lever.co/acme": _result("https://jobs.lever.co/acme", 200, _CAREERS_PAGE_HTML),
+        }
+    )
+
+    result = await resolve_source(_company(), fetcher)
+
+    assert result.status == SourceResolutionStatus.NEEDS_REVIEW
+    assert result.value is not None
+    assert result.value.resolution_strategy == ResolutionStrategy.TAVILY_SEARCH
+    assert result.value.resolution_confidence == 0.40

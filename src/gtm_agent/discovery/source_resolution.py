@@ -11,10 +11,7 @@ Phase 1 implements the resolution ladder's strategies A, B, and E:
 
 Phase 2 adds:
     C — sitemap.xml (`SitemapStrategy`)
-
-Strategy D (Tavily search fallback) remains a placeholder that always
-declines (returns `None`) — it depends on `services.tavily`, which is a stub
-until that later-phase work lands.
+    D — Tavily search fallback (`TavilySearchStrategy`)
 """
 
 from __future__ import annotations
@@ -35,6 +32,7 @@ from gtm_agent.discovery.ats_platforms import known_ats_platform_for_host
 from gtm_agent.models.careers_source import CareersSource, ResolutionStrategy
 from gtm_agent.models.company import Company
 from gtm_agent.models.results import SourceResolutionStatus, StageResult
+from gtm_agent.services.tavily import TavilyClient, TavilyNotConfiguredError, TavilySearchError
 
 logger = get_logger(__name__)
 
@@ -77,6 +75,8 @@ _CONFIDENCE_HOMEPAGE_ATS = 0.95
 _CONFIDENCE_HOMEPAGE_OWN_DOMAIN = 0.85
 _CONFIDENCE_PATH_PROBE = 0.75
 _CONFIDENCE_SITEMAP = 0.75
+_CONFIDENCE_TAVILY_DOMAIN_RESTRICTED = 0.60
+_CONFIDENCE_TAVILY_UNRESTRICTED = 0.40  # below _CONFIDENCE_FLOOR — always NEEDS_REVIEW
 _CONFIDENCE_FLOOR = 0.50
 
 
@@ -327,16 +327,91 @@ async def _urls_from_sitemap_index(sitemap_locs: list[str], fetcher: Fetcher) ->
 
 
 class TavilySearchStrategy:
-    """Strategy D (spec §4.1) — NOT IMPLEMENTED in Phase 1. Always declines.
+    """Strategy D (spec §4.1). Falls back to a Tavily search: a domain-restricted
+    query first, then an unrestricted one.
 
-    Depends on `services.tavily`, which is a stub in this phase (no API calls yet).
+    Domain-restrict first — the unrestricted query is prone to returning an
+    aggregator's page *about* the company rather than the company's own
+    board, which is a silent correctness failure. Any unrestricted result's
+    host is therefore validated against the known company domain and the ATS
+    domain list before being accepted.
     """
 
     strategy = ResolutionStrategy.TAVILY_SEARCH
 
+    def __init__(self, tavily_client: TavilyClient | None = None) -> None:
+        self._tavily_client = tavily_client or TavilyClient()
+
     async def attempt(self, company: Company, fetcher: Fetcher) -> ResolutionCandidate | None:
-        logger.debug("tavily_strategy_not_implemented", domain=company.domain)
-        return None
+        if not self._tavily_client.is_configured:
+            logger.debug("tavily_not_configured", domain=company.domain)
+            return None
+
+        restricted_query = f'"{company.name}" careers open positions site:{company.domain}'
+        try:
+            restricted_results = await self._tavily_client.search(
+                restricted_query, fetcher=fetcher, restrict_domain=company.domain
+            )
+        except (TavilyNotConfiguredError, TavilySearchError) as exc:
+            logger.info("tavily_search_failed", domain=company.domain, error=str(exc))
+            restricted_results = []
+
+        candidate_url = _first_result_url(restricted_results)
+        if candidate_url is not None:
+            validated = await _fetch_and_validate(candidate_url, fetcher)
+            return ResolutionCandidate(
+                url=candidate_url,
+                confidence=_CONFIDENCE_TAVILY_DOMAIN_RESTRICTED,
+                strategy=self.strategy,
+                validated=validated,
+            )
+
+        unrestricted_query = f'"{company.name}" jobs'
+        try:
+            unrestricted_results = await self._tavily_client.search(unrestricted_query, fetcher=fetcher)
+        except (TavilyNotConfiguredError, TavilySearchError) as exc:
+            logger.info("tavily_search_failed", domain=company.domain, error=str(exc))
+            return None
+
+        candidate_url = _first_result_url_on_known_host(unrestricted_results, company.domain)
+        if candidate_url is None:
+            return None
+
+        validated = await _fetch_and_validate(candidate_url, fetcher)
+        return ResolutionCandidate(
+            url=candidate_url,
+            confidence=_CONFIDENCE_TAVILY_UNRESTRICTED,
+            strategy=self.strategy,
+            validated=validated,
+        )
+
+
+def _first_result_url(results: list[dict[str, object]]) -> str | None:
+    for result in results:
+        url = result.get("url")
+        if isinstance(url, str) and url:
+            return url
+    return None
+
+
+def _first_result_url_on_known_host(results: list[dict[str, object]], company_domain: str) -> str | None:
+    """spec §4.1 Strategy D: validate an unrestricted result's host against
+    the known company domain or the known ATS domain list before accepting.
+    """
+    for result in results:
+        url = result.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        host = urlparse(url).netloc
+        if _host_matches_domain(host, company_domain) or known_ats_platform_for_host(host) is not None:
+            return url
+    return None
+
+
+def _host_matches_domain(host: str, domain: str) -> bool:
+    host = host.lower().lstrip(".")
+    domain = domain.lower().lstrip(".")
+    return host == domain or host.endswith(f".{domain}")
 
 
 _STRATEGY_LADDER: tuple[ResolutionStrategyHandler, ...] = (

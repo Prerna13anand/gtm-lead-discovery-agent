@@ -15,7 +15,7 @@ class ResolutionStrategy(StrEnum):
     HOMEPAGE_LINK = "homepage_link"
     PATH_PROBE = "path_probe"
     SITEMAP = "sitemap"  # Strategy C
-    TAVILY_SEARCH = "tavily_search"  # Strategy D — not implemented in Phase 1
+    TAVILY_SEARCH = "tavily_search"  # Strategy D
     MANUAL_OVERRIDE = "manual_override"
 
 
