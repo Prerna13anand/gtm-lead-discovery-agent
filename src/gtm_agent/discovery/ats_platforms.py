@@ -83,6 +83,7 @@ BOARD_TOKEN_PATTERNS: dict[AtsPlatform, re.Pattern[str]] = {
     # Excludes the `/j/{shortcode}` shortlink form (no account segment) —
     # without the lookahead, "j" would be mistaken for an account slug.
     AtsPlatform.WORKABLE: re.compile(r"apply\.workable\.com/(?!j/)([\w-]+)", re.I),
+    AtsPlatform.SMARTRECRUITERS: re.compile(r"careers\.smartrecruiters\.com/([\w-]+)", re.I),
 }
 
 

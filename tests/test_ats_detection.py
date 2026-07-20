@@ -82,6 +82,17 @@ def test_route_extraction_routes_workable_like_the_other_real_adapters():
     assert route_extraction(identification, page_html=None) == AtsPlatform.WORKABLE
 
 
+def test_route_extraction_routes_smartrecruiters_like_the_other_real_adapters():
+    identification = AtsIdentification(
+        company_id="acme",
+        platform=AtsPlatform.SMARTRECRUITERS,
+        confidence=0.98,
+        detection_signal=DetectionSignal.URL_HOST_MATCH,
+        created_at=datetime.now(UTC),
+    )
+    assert route_extraction(identification, page_html=None) == AtsPlatform.SMARTRECRUITERS
+
+
 def test_route_extraction_falls_back_to_jsonld_when_no_ats_identified():
     html = '<script type="application/ld+json">{"@type": "JobPosting"}</script>'
     assert route_extraction(None, page_html=html) == AtsPlatform.JSONLD

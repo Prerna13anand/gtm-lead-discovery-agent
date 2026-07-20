@@ -1,0 +1,15 @@
+{
+  "id": "1000000000001",
+  "name": "Packaging Engineer",
+  "postingUrl": "https://jobs.smartrecruiters.com/Acme/1000000000001-packaging-engineer",
+  "applyUrl": "https://jobs.smartrecruiters.com/Acme/1000000000001-packaging-engineer?oga=true",
+  "company": { "identifier": "Acme", "name": "Acme" },
+  "jobAd": {
+    "sections": {
+      "companyDescription": { "title": "Company Description", "text": "<p>Acme builds things.</p>" },
+      "jobDescription": { "title": "Job Description", "text": "<p>Build packaging systems.</p>" },
+      "qualifications": { "title": "Qualifications", "text": "<ul><li>5+ years experience</li></ul>" },
+      "additionalInformation": { "title": "Additional Information", "text": "<p>EEO statement.</p>" }
+    }
+  }
+}

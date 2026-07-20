@@ -160,6 +160,7 @@ def route_extraction(identification: AtsIdentification | None, page_html: str | 
         AtsPlatform.LEVER,
         AtsPlatform.ASHBY,
         AtsPlatform.WORKABLE,
+        AtsPlatform.SMARTRECRUITERS,
     ):
         if identification.confidence >= _ADAPTER_ROUTING_CONFIDENCE_FLOOR:
             return identification.platform

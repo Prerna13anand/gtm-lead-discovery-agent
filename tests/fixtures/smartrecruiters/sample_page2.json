@@ -1,0 +1,33 @@
+{
+  "offset": 2,
+  "limit": 100,
+  "totalFound": 3,
+  "content": [
+    {
+      "id": "1000000000003",
+      "name": "Founding Designer",
+      "uuid": "eeee5555-5555-5555-5555-555555555555",
+      "jobAdId": "ffff6666-6666-6666-6666-666666666666",
+      "defaultJobAd": true,
+      "refNumber": "REF00003",
+      "ref": "https://api.smartrecruiters.com/v1/companies/acme/postings/1000000000003",
+      "company": { "identifier": "Acme", "name": "Acme" },
+      "releasedDate": "2026-06-10T10:00:00.000Z",
+      "location": {
+        "city": "San Francisco",
+        "region": "California",
+        "country": "us",
+        "postalCode": "94103",
+        "remote": false,
+        "hybrid": true,
+        "fullLocation": "San Francisco, California, United States"
+      },
+      "industry": { "id": "software", "label": "Software" },
+      "department": { "id": "design", "label": "Design" },
+      "function": { "id": "design", "label": "Design" },
+      "typeOfEmployment": { "id": "permanent", "label": "Full-time" },
+      "experienceLevel": { "id": "mid_senior_level", "label": "Mid-Senior Level" },
+      "customField": []
+    }
+  ]
+}
