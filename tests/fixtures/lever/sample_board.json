@@ -1,0 +1,49 @@
+[
+  {
+    "id": "e0c43af6-5bc2-4a3a-a3c6-9b6448e1d594",
+    "text": "Senior Backend Engineer",
+    "createdAt": 1745079959213,
+    "workplaceType": "remote",
+    "country": "US",
+    "hostedUrl": "https://jobs.lever.co/acme/e0c43af6-5bc2-4a3a-a3c6-9b6448e1d594",
+    "applyUrl": "https://jobs.lever.co/acme/e0c43af6-5bc2-4a3a-a3c6-9b6448e1d594/apply",
+    "categories": {
+      "commitment": "Full Time",
+      "department": "Engineering",
+      "location": "Remote",
+      "team": "Platform",
+      "allLocations": ["Remote"]
+    },
+    "description": "<h3>About the role</h3><p>We build things.</p>",
+    "descriptionPlain": "About the role\nWe build things.",
+    "lists": [
+      {
+        "text": "You will:",
+        "content": "<li>Design and build backend services</li><li>Own the platform roadmap</li>"
+      }
+    ],
+    "additional": "<p>5+ years experience required.</p>",
+    "additionalPlain": "5+ years experience required."
+  },
+  {
+    "id": "b1a2c3d4-5e6f-4a3b-8c9d-0e1f2a3b4c5d",
+    "text": "Founding Design Lead",
+    "createdAt": 1745166359213,
+    "workplaceType": "hybrid",
+    "country": "US",
+    "hostedUrl": "https://jobs.lever.co/acme/b1a2c3d4-5e6f-4a3b-8c9d-0e1f2a3b4c5d",
+    "applyUrl": "https://jobs.lever.co/acme/b1a2c3d4-5e6f-4a3b-8c9d-0e1f2a3b4c5d/apply",
+    "categories": {
+      "commitment": "Full Time",
+      "department": "Design",
+      "location": "San Francisco, CA",
+      "team": "Design",
+      "allLocations": ["San Francisco, CA"]
+    },
+    "description": "<p>Own design end to end.</p>",
+    "descriptionPlain": "Own design end to end.",
+    "lists": [],
+    "additional": "",
+    "additionalPlain": ""
+  }
+]
