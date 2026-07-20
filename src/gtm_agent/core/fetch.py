@@ -1,12 +1,16 @@
 """Shared async HTTP fetch layer.
 
 Phase 1 scope: a single shared `httpx.AsyncClient`, sane timeouts, an honest
-static User-Agent, and bounded retry with backoff on transient failures. This
-is intentionally the simple version.
+static User-Agent, and bounded retry with backoff on transient failures.
+
+Phase 2 addition: conditional requests (spec §6.3). The fetcher remembers the
+`ETag` / `Last-Modified` validators returned for a URL and sends them back as
+`If-None-Match` / `If-Modified-Since` on the next request to that URL. A `304`
+response means "unchanged since last time" — callers see it via
+`FetchResult.status_code == 304` and can skip re-processing.
 
 Deliberately NOT implemented yet (spec §6.3) — left as TODOs for later phases:
     - robots.txt fetching/caching and pre-request consultation (spec §21.1)
-    - conditional requests (ETag / If-None-Match, Last-Modified / 304 handling)
     - per-domain semaphore / politeness rate limiting (spec §16.3)
     - honouring `Retry-After` headers
     - content-addressed raw-payload caching (spec §6.4)
@@ -83,6 +87,12 @@ class Fetcher:
         self.request_count = 0
         self.bytes_fetched = 0
 
+        # Conditional-request validators (spec §6.3), keyed by the URL passed
+        # to get()/head(). In-memory and per-Fetcher-instance — deliberately
+        # not the persistent, cross-sweep cache of §6.4; that's a separate,
+        # not-yet-built store this can later sit behind.
+        self._validators: dict[str, dict[str, str]] = {}
+
     async def __aenter__(self) -> Fetcher:
         return self
 
@@ -105,8 +115,12 @@ class Fetcher:
 
     async def _request(self, method: str, url: str, **kwargs: object) -> FetchResult:
         # TODO(phase 2): consult robots.txt cache before issuing the request (spec §21.1)
-        # TODO(phase 2): attach If-None-Match / If-Modified-Since from cache (spec §6.3)
         # TODO(phase 2): acquire a per-domain semaphore before issuing the request (spec §16.3)
+
+        conditional_headers = self._conditional_headers(url)
+        if conditional_headers:
+            merged_headers = {**conditional_headers, **(kwargs.pop("headers", None) or {})}
+            kwargs["headers"] = merged_headers
 
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
@@ -122,6 +136,10 @@ class Fetcher:
 
             self.request_count += 1
             self.bytes_fetched += len(response.content)
+
+            if response.status_code < 400:
+                # Errors don't get to overwrite a validator that pointed at good content.
+                self._store_validators(url, response.headers)
 
             if response.status_code in _NON_RETRYABLE_STATUS_CODES:
                 return FetchResult(
@@ -152,3 +170,28 @@ class Fetcher:
     async def _sleep_backoff(self, attempt: int) -> None:
         delay = self._backoff_base_seconds * (2**attempt)
         await asyncio.sleep(delay)
+
+    def _conditional_headers(self, url: str) -> dict[str, str]:
+        """Build If-None-Match / If-Modified-Since headers from stored validators (spec §6.3)."""
+        validators = self._validators.get(url)
+        if not validators:
+            return {}
+        headers: dict[str, str] = {}
+        if etag := validators.get("etag"):
+            headers["If-None-Match"] = etag
+        if last_modified := validators.get("last_modified"):
+            headers["If-Modified-Since"] = last_modified
+        return headers
+
+    def _store_validators(self, url: str, headers: httpx.Headers) -> None:
+        """Remember ETag / Last-Modified for this URL so the next request can be conditional."""
+        etag = headers.get("ETag")
+        last_modified = headers.get("Last-Modified")
+        if not etag and not last_modified:
+            return
+        validators: dict[str, str] = {}
+        if etag:
+            validators["etag"] = etag
+        if last_modified:
+            validators["last_modified"] = last_modified
+        self._validators[url] = validators

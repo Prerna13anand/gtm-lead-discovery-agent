@@ -192,6 +192,19 @@ async def test_discover_non_array_body_returns_schema_violation(adapter: LeverAd
     assert result.status == ExtractionStatus.SCHEMA_VIOLATION
 
 
+async def test_discover_304_is_treated_as_unchanged_not_an_error(adapter: LeverAdapter) -> None:
+    # A conditional request (spec §6.3) returns 304 with an empty body — this
+    # must not be parsed as JSON and must not be mistaken for a schema violation.
+    postings_url = _postings_url("acme")
+    fetcher = FakeFetcher({postings_url: _result(postings_url, 304, "")})
+    source = _source("https://jobs.lever.co/acme")
+
+    result = await adapter.discover(source, fetcher)
+
+    assert result.status == ExtractionStatus.SUCCESS
+    assert result.value == []
+
+
 async def test_hydrate_is_a_noop(adapter: LeverAdapter) -> None:
     from gtm_agent.models.job import RawPosting
 

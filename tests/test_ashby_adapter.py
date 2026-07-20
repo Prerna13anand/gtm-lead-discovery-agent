@@ -201,6 +201,19 @@ async def test_discover_non_dict_body_returns_schema_violation(adapter: AshbyAda
     assert result.status == ExtractionStatus.SCHEMA_VIOLATION
 
 
+async def test_discover_304_is_treated_as_unchanged_not_an_error(adapter: AshbyAdapter) -> None:
+    # A conditional request (spec §6.3) returns 304 with an empty body — this
+    # must not be parsed as JSON and must not be mistaken for a schema violation.
+    board_url = _job_board_url("acme")
+    fetcher = FakeFetcher({board_url: _result(board_url, 304, "")})
+    source = _source("https://jobs.ashbyhq.com/acme")
+
+    result = await adapter.discover(source, fetcher)
+
+    assert result.status == ExtractionStatus.SUCCESS
+    assert result.value == []
+
+
 async def test_hydrate_is_a_noop(adapter: AshbyAdapter) -> None:
     from gtm_agent.models.job import RawPosting
 

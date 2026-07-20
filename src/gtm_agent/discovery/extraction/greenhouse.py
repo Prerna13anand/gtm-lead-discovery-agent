@@ -144,6 +144,11 @@ class GreenhouseAdapter:
             return StageResult(status=ExtractionStatus.BLOCKED_403, detail=f"HTTP {result.status_code}")
         if result.status_code >= 400:
             return StageResult(status=ExtractionStatus.SCHEMA_VIOLATION, detail=f"HTTP {result.status_code}")
+        if result.status_code == 304:
+            # Conditional request (spec §6.3): board unchanged since our last
+            # fetch. The body is empty by HTTP definition — nothing to parse,
+            # and this is not an error.
+            return StageResult(status=ExtractionStatus.SUCCESS, value=[])
 
         try:
             payload: dict[str, Any] = json.loads(result.text)
