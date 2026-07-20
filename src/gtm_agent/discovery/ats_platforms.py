@@ -80,6 +80,9 @@ BOARD_TOKEN_PATTERNS: dict[AtsPlatform, re.Pattern[str]] = {
     ),
     AtsPlatform.LEVER: re.compile(r"jobs\.lever\.co/([\w-]+)", re.I),
     AtsPlatform.ASHBY: re.compile(r"(?:jobs|embed)\.ashbyhq\.com/([\w-]+)", re.I),
+    # Excludes the `/j/{shortcode}` shortlink form (no account segment) —
+    # without the lookahead, "j" would be mistaken for an account slug.
+    AtsPlatform.WORKABLE: re.compile(r"apply\.workable\.com/(?!j/)([\w-]+)", re.I),
 }
 
 

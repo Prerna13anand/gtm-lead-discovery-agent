@@ -64,9 +64,10 @@ _UNRESOLVED_SOURCE_STATUSES = frozenset(
     }
 )
 
-# The three real ATS-API adapters (spec §22 Phase 1). JSON-LD and
-# generic-HTML are fallback extraction paths, not "an ATS adapter".
-_REAL_ATS_ADAPTERS = frozenset({"greenhouse", "lever", "ashby"})
+# The real ATS-API adapters (spec §22 Phase 1: greenhouse/lever/ashby;
+# Phase 2 adds workable). JSON-LD and generic-HTML are fallback extraction
+# paths, not "an ATS adapter".
+_REAL_ATS_ADAPTERS = frozenset({"greenhouse", "lever", "ashby", "workable"})
 
 
 @dataclass(frozen=True)

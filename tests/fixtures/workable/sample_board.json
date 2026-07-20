@@ -1,0 +1,75 @@
+{
+  "name": "Acme",
+  "description": "<p>Acme builds things.</p>",
+  "jobs": [
+    {
+      "title": "Senior Backend Engineer",
+      "shortcode": "AB12CD34EF",
+      "code": "",
+      "employment_type": "Full-time",
+      "telecommuting": true,
+      "department": "Engineering",
+      "url": "https://apply.workable.com/j/AB12CD34EF",
+      "shortlink": "https://apply.workable.com/j/AB12CD34EF",
+      "application_url": "https://apply.workable.com/j/AB12CD34EF/apply",
+      "published_on": "2026-06-01",
+      "created_at": "2026-05-20",
+      "country": "United States",
+      "city": "New York",
+      "state": "New York",
+      "education": null,
+      "experience": "Senior",
+      "function": "Engineering",
+      "industry": "Internet",
+      "locations": [
+        {"country": "United States", "countryCode": "US", "city": "New York", "region": "New York", "hidden": false}
+      ]
+    },
+    {
+      "title": "Senior Backend Engineer",
+      "shortcode": "AB12CD34EF",
+      "code": "",
+      "employment_type": "Full-time",
+      "telecommuting": true,
+      "department": "Engineering",
+      "url": "https://apply.workable.com/j/AB12CD34EF",
+      "shortlink": "https://apply.workable.com/j/AB12CD34EF",
+      "application_url": "https://apply.workable.com/j/AB12CD34EF/apply",
+      "published_on": "2026-06-01",
+      "created_at": "2026-05-20",
+      "country": "United Kingdom",
+      "city": "London",
+      "state": "England",
+      "education": null,
+      "experience": "Senior",
+      "function": "Engineering",
+      "industry": "Internet",
+      "locations": [
+        {"country": "United Kingdom", "countryCode": "GB", "city": "London", "region": "England", "hidden": false}
+      ]
+    },
+    {
+      "title": "Founding Designer",
+      "shortcode": "GH56IJ78KL",
+      "code": "",
+      "employment_type": "Full-time",
+      "telecommuting": false,
+      "department": "Design",
+      "url": "https://apply.workable.com/j/GH56IJ78KL",
+      "shortlink": "https://apply.workable.com/j/GH56IJ78KL",
+      "application_url": "https://apply.workable.com/j/GH56IJ78KL/apply",
+      "published_on": "2026-06-10",
+      "created_at": "2026-06-01",
+      "country": "United States",
+      "city": "San Francisco",
+      "state": "California",
+      "education": null,
+      "experience": "Mid-Senior level",
+      "function": "Design",
+      "industry": "Internet",
+      "locations": [
+        {"country": "United States", "countryCode": "US", "city": "San Francisco", "region": "California", "hidden": false}
+      ]
+    }
+  ]
+}
