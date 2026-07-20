@@ -3,30 +3,30 @@
 Implementation of the pipeline described in [`JOB_SCRAPING_AGENT.md`](JOB_SCRAPING_AGENT.md). That document is the
 engineering specification; this README describes only what is actually built so far.
 
-## Status: Phase 2C (in progress)
+## Status: Phase 1 normalisation core complete
 
 Phase 1 built the project foundation and **Part I — Job Discovery** (spec §4–§7):
 
 - Project structure, configuration, logging
 - Stage 1 — Source Resolution (spec §4): homepage-link and path-probe strategies, manual override
 - Stage 2 — ATS Fingerprinting (spec §5): detection signal architecture and platform registry
-- Stage 3 — Extraction (spec §6): the `BoardAdapter` interface and adapter registry, with **placeholder**
-  adapters for Greenhouse, Lever, and Ashby.
+- Stage 3 — Extraction (spec §6): the `BoardAdapter` interface and adapter registry. **Greenhouse, Lever, and
+  Ashby adapters are real** (Phases 2A/2B/2C), against each platform's public job-board API; the generic-HTML
+  fallback is still a placeholder.
 - Stage 4 — Normalisation (spec §7): title canonicalisation, location parsing, rules-based function/seniority
-  classification, `posted_at` inference — built against **schema.org/JSON-LD field names only**
+  classification, `posted_at` inference — **now platform-aware**, dispatching on `RawPosting.source_platform`
+  to read each ATS's native field names (title, description, location, department, employment type,
+  `posted_at`), per spec §7's own goal statement ("`RawPosting` (platform-shaped) → `JobPosting`") and the
+  explicit "ATS-native field" language in §7.5 and §7.7. JSON-LD's behaviour is unchanged — it's one dispatch
+  branch among four now, not the only path.
 - Placeholder service modules for Azure OpenAI (config/init only), Apollo, PDL, and Tavily — no integration logic
-
-Phase 2A replaced the Greenhouse placeholder with a real adapter against the public Greenhouse Job Board API
-(`boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true`). Phase 2B did the same for Lever, against the
-public Lever Postings API (`api.lever.co/v0/postings/{token}?mode=json`). Phase 2C does the same for Ashby,
-against the public Ashby Job Board API (`api.ashbyhq.com/posting-api/job-board/{token}`). All three of the
-Phase 1 ATS-API adapters are now real; the generic-HTML fallback is the remaining placeholder.
 
 **Not yet built:** lead discovery, matching, enrichment, company context, scoring, ranking, publication,
 change detection/identity (spec §8), a real fetch-layer politeness stack (robots.txt, conditional requests,
-per-domain rate limiting), real generic-HTML extraction. See inline `TODO` markers and module docstrings for
-what's deferred and to which phase, and **Known limitations / follow-ups** below for the gaps each ATS
-adapter's real implementation exposed.
+per-domain rate limiting), real generic-HTML extraction, the `scrape_run` ledger and basic coverage metrics
+(the two remaining named items in the spec's own §22 Phase 1 scope). See inline `TODO` markers and module
+docstrings for what's deferred and to which phase, and **Known limitations / follow-ups** below for what's
+still intentionally out of scope.
 
 ## Project layout
 
@@ -58,40 +58,32 @@ python main.py discover --domain example.com --name "Example Inc"
 
 This runs Stages 1–4 for a single company and prints the resulting job postings (or the typed failure state
 if resolution/extraction doesn't succeed). Real Greenhouse-, Lever-, and Ashby-hosted companies now all
-return real postings. Note the normalisation gap below — each platform under- or over-populates different
-fields until that follow-up lands.
+return real postings with title, location, workplace type, department, employment type (where the platform
+exposes one), and a real (non-inferred) `posted_at` populated correctly per platform.
 
 ## Known limitations / follow-ups
 
-**`normalize()` doesn't yet understand Greenhouse-, Lever-, or Ashby-shaped payloads (follow-up for the next
-milestone).** `discovery/normalization.py`'s `normalize()` reads schema.org/JSON-LD field names only
-(`title`, `description`, `jobLocation`, `baseSalary`, `employmentType`, `datePosted`) because JSON-LD was the
-only real payload shape that existed when it was written. All three adapters deliberately preserve their
-platform's *native* job shape in `RawPosting.raw_payload` rather than translating it to schema.org — per spec
-§6.4, the raw payload should be archived untouched. The consequence, verified empirically (not just asserted
-by analogy) for each platform — three distinct coincidental-match patterns:
+**`normalize()`'s per-platform field mapping covers the required fields only — some enhancements were
+deliberately left out.** The Stage 4 fix (dispatching on `RawPosting.source_platform` for title, description,
+location, department, employment type, and `posted_at`) was scoped strictly to what spec §7 requires. Left
+out on purpose, not forgotten:
 
-- **Greenhouse** (fields: `content`, `location.name`, `departments`, no `baseSalary`) — `title` matches by
-  coincidence (both shapes use the key `"title"`), so title and rules-based function/seniority classification
-  work. `description_text`, `locations`, and `department_raw` stay empty (Greenhouse uses `content`, not
-  `description`).
-- **Lever** (fields: `text` for title, `categories.location`/`categories.department`, no `baseSalary`) — the
-  *opposite* coincidence: Lever happens to use the key `"description"` too, so `description_text` comes out
-  populated. But `title_raw`/`title_canonical` stay **empty** (Lever's title key is `text`, not `title`),
-  which means function/seniority classification has nothing to match against and also returns `None`.
-  `locations` and `department_raw` stay empty as well.
-- **Ashby** (fields: `descriptionHtml`/`descriptionPlain`, a flat `location` string, PascalCase
-  `workplaceType`/`employmentType`, `publishedAt`, no `baseSalary`) — a *third* pattern: `title` matches by
-  coincidence (like Greenhouse), so title/function/seniority work. `department` is a flat top-level string in
-  both Ashby's native shape and what `normalize()` expects — the **only one of the three adapters** where
-  `department_raw` comes out populated with no fix needed. But `description_text`, `locations`,
-  `workplace_type`, and `employment_type` all stay empty (Ashby uses `descriptionHtml` not `description`, a
-  flat `location` string not `jobLocation`, and PascalCase enums that don't match schema.org's).
-
-Fixing this needs per-platform field mapping in Stage 4 — most likely a small dispatch on
-`RawPosting.source_platform` before the schema.org-shaped extraction logic runs, or a per-adapter "to
-canonical fields" translation step done in Stage 3 instead. Left as an explicit next-milestone task rather
-than folded into any adapter's work, to keep each change scoped to Stage 3 only.
+- **Lever's description is `categories`-adjacent `description` only** — not assembled with Lever's separate
+  `opening`, `lists`, and `additional` fields. Spec §7.6 calls the requirements list "the highest-signal part
+  of a posting," and Lever's `lists` field (e.g. a "You will:" heading + bullets) is exactly that, kept
+  separate from `description` in Lever's own shape. The current fix already yields a non-empty, usable
+  description from `description` alone; assembling the other sections into one richer blob is a real quality
+  improvement but wasn't required to close the gap, so it's left for a future pass.
+- **Greenhouse's `offices[]` array** isn't consulted as a secondary/cross-check location source alongside
+  `location.name`.
+- **Compensation extraction** stays JSON-LD-only. No structured compensation field was found on any of the
+  three real ATS payloads examined during this build — that's an absence of data on those boards, not a gap
+  in the normalizer (spec §7.5: never infer compensation from free text).
+- **Full boilerplate stripping / non-English handling (§7.6)** and **markdown structure preservation**
+  (`description_markdown` still equals `description_text`) remain pre-existing simplifications, unrelated to
+  platform field-mapping specifically.
+- **LLM residue classification (§7.3)** for titles the rules-based classifier can't resolve is still
+  unimplemented, pending `services.azure_openai` having real scoring logic.
 
 **Board-token resolution duplicates a Stage 2 fetch in one case.** The `BoardAdapter` interface (spec §6.1)
 receives only `CareersSource`, not `AtsIdentification` — so `GreenhouseAdapter`, `LeverAdapter`, and

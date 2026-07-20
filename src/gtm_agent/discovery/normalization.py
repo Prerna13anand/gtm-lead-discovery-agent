@@ -1,24 +1,39 @@
 """Stage 4 — Normalisation (spec §7).
 
 Goal: `RawPosting` (platform-shaped) -> `JobPosting` (canonical), with
-provenance and confidence on every derived field.
+provenance and confidence on every derived field. Per §7's own goal
+statement, the input is explicitly "platform-shaped" — this module dispatches
+on `RawPosting.source_platform` to read each ATS's native field names for
+title, description, location, department, employment type, and `posted_at`
+(spec §7.5, §7.7 both explicitly call for "ATS-native fields", not just
+JSON-LD's). Greenhouse, Lever, and Ashby each get their own extraction
+branch; JSON-LD (and any other/unknown platform) falls through to the
+original schema.org-shaped logic, unchanged.
 
-Phase 1 scope and simplifications, called out explicitly rather than hidden:
-    - Only structured (dict) payloads are normalised for real. In Phase 1
-      that means JSON-LD output, since the ATS-API and generic-HTML adapters
-      are placeholders that never produce postings yet. A string (HTML)
-      payload is normalised into a maximally-degraded `JobPosting` rather
-      than guessed at.
+Only the *extraction* step is platform-aware. Title canonicalisation,
+function/seniority classification, description cleaning, and location
+structuring stay platform-agnostic — they operate on whatever the
+extraction step hands them, exactly as before.
+
+Phase 1 scope and simplifications still in force, called out explicitly
+rather than hidden:
+    - Only structured (dict) payloads are normalised for real. A string
+      (HTML) payload — the generic-HTML adapter's eventual output — is
+      normalised into a maximally-degraded `JobPosting` rather than guessed
+      at.
     - Function/seniority classification (§7.3) is rules-only. Spec §7.3 also
       wants an LLM fallback for titles the rules can't resolve; that depends
       on `services.azure_openai`, which is a config-only stub in Phase 1 —
       see the TODO in `_classify_function`.
     - Location parsing (§7.4) and description cleaning (§7.6) implement the
       common cases (multi-location strings, remote/hybrid qualifiers,
-      structured schema.org places, basic HTML-to-text) but not the full
+      structured places, basic HTML-to-text) but not the full
       boilerplate-stripping and non-English handling the spec describes.
     - Compensation (§7.5) is extracted only from structured `baseSalary` —
-      never inferred via regex over description text, per spec.
+      never inferred via regex over description text, per spec. No
+      platform-specific compensation field was found on any of the three
+      real ATS payloads examined, so this stays JSON-LD-only; that's an
+      absence of data, not a gap in this normalizer.
     - `job_id` derivation implements the §8.1 identity ladder (ATS-native ID,
       canonical URL, content hash) because `JobPosting.job_id` is required —
       but this is *not* Stage 5. There is no diffing against a previous run,
@@ -35,6 +50,7 @@ from typing import Any
 
 from selectolax.parser import HTMLParser
 
+from gtm_agent.models.ats import AtsPlatform
 from gtm_agent.models.common import (
     Compensation,
     EmploymentType,
@@ -86,6 +102,44 @@ def _canonicalize_title(title_raw: str) -> str:
     if text and (text == text.lower() or text == text.upper()):
         text = text.title()
     return text.strip()
+
+
+# --- Platform-aware field extraction (spec §7 goal: "RawPosting (platform-shaped)") ---
+def _extract_title(platform: str, payload: dict[str, Any]) -> str:
+    # Lever's title key is `text`; Greenhouse, Ashby, and JSON-LD all use `title`.
+    key = "text" if platform == AtsPlatform.LEVER else "title"
+    return str(payload.get(key) or "").strip()
+
+
+def _extract_department(platform: str, payload: dict[str, Any]) -> str | None:
+    if platform == AtsPlatform.GREENHOUSE:
+        departments = payload.get("departments")
+        if isinstance(departments, list) and departments and isinstance(departments[0], dict):
+            name = departments[0].get("name")
+            return name if isinstance(name, str) else None
+        return None
+
+    if platform == AtsPlatform.LEVER:
+        categories = payload.get("categories")
+        if isinstance(categories, dict):
+            name = categories.get("department")
+            return name if isinstance(name, str) else None
+        return None
+
+    # Ashby uses a flat top-level "department" string already; JSON-LD has no
+    # standard equivalent but the same lookup is harmless (spec §7 predates
+    # this dispatch and always used this key uniformly).
+    value = payload.get("department")
+    return value if isinstance(value, str) else None
+
+
+def _extract_description_html(platform: str, payload: dict[str, Any]) -> str:
+    if platform == AtsPlatform.GREENHOUSE:
+        return str(payload.get("content") or "")
+    if platform == AtsPlatform.ASHBY:
+        return str(payload.get("descriptionHtml") or "")
+    # Lever and JSON-LD both use "description".
+    return str(payload.get("description") or "")
 
 
 # --- Function / seniority classification (spec §7.3) ---
@@ -191,9 +245,13 @@ def _split_location_string(raw: str) -> list[Location]:
     return locations or [Location(raw=raw)]
 
 
-def _parse_location(
+def _parse_location_schema_org(
     payload: dict[str, Any], description_text: str
 ) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
+    """JSON-LD / schema.org-shaped location parsing. Unchanged from before this
+    module dispatched by platform — kept verbatim so JSON-LD behaviour is
+    identical to what it was.
+    """
     job_location = payload.get("jobLocation")
     location_raw: str | None = None
     locations: list[Location] = []
@@ -237,6 +295,176 @@ def _parse_location(
     return location_raw, locations, workplace_type, remote_scope
 
 
+def _resolve_hybrid_override(workplace_type: WorkplaceType | None, description_text: str) -> WorkplaceType | None:
+    """Spec §7.4: the description is often the only place hybrid expectations
+    are stated, and should win when it contradicts other signals.
+    """
+    if re.search(r"\bhybrid\b", description_text, re.I) and workplace_type != WorkplaceType.HYBRID:
+        return WorkplaceType.HYBRID
+    return workplace_type
+
+
+def _extract_remote_scope(location_raw: str | None) -> str | None:
+    remote_match = re.search(r"remote\s*\(([^)]+)\)", location_raw or "", re.I)
+    return remote_match.group(1) if remote_match else None
+
+
+def _apply_remote_flag(locations: list[Location], workplace_type: WorkplaceType | None, remote_scope: str | None) -> None:
+    if workplace_type == WorkplaceType.REMOTE:
+        for location in locations:
+            location.is_remote = True
+            location.remote_scope = location.remote_scope or remote_scope
+
+
+def _parse_location_greenhouse(
+    payload: dict[str, Any], description_text: str
+) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
+    """Greenhouse's `location` is `{"name": "Remote, Italy"}` — a single
+    combined string, not schema.org's nested Place. Splitting it on comma the
+    way schema.org multi-location strings are split on `/` would wrongly turn
+    "Remote, Italy" into two fake locations, so it's kept as one entry.
+    Greenhouse exposes no direct workplace-type field, so the regex fallback
+    (same as the schema.org path) is the only signal available.
+    """
+    location = payload.get("location")
+    name = location.get("name") if isinstance(location, dict) else None
+    location_raw = name if isinstance(name, str) and name else None
+
+    locations: list[Location] = []
+    if location_raw:
+        is_remote = bool(re.search(r"\bremote\b", location_raw, re.I))
+        locations = [Location(raw=location_raw, is_remote=is_remote)]
+
+    workplace_type: WorkplaceType | None = None
+    if location_raw:
+        if re.search(r"\bremote\b", location_raw, re.I):
+            workplace_type = WorkplaceType.REMOTE
+        elif re.search(r"\bhybrid\b", location_raw, re.I):
+            workplace_type = WorkplaceType.HYBRID
+    workplace_type = _resolve_hybrid_override(workplace_type, description_text)
+
+    remote_scope = _extract_remote_scope(location_raw)
+    _apply_remote_flag(locations, workplace_type, remote_scope)
+
+    return location_raw, locations, workplace_type, remote_scope
+
+
+_LEVER_WORKPLACE_TYPE_MAP: dict[str, WorkplaceType] = {
+    "remote": WorkplaceType.REMOTE,
+    "hybrid": WorkplaceType.HYBRID,
+    "onsite": WorkplaceType.ONSITE,
+}
+
+
+def _parse_location_lever(
+    payload: dict[str, Any], description_text: str
+) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
+    """Lever's `categories.allLocations` is already a clean, pre-split array —
+    a strictly better source than regex-splitting a combined string, so it's
+    used directly when present. `categories.workplaceType` is a direct
+    structured signal and is preferred over the regex fallback (spec's
+    general preference for structured fields over guessing, §7.5).
+    """
+    categories = payload.get("categories") if isinstance(payload.get("categories"), dict) else {}
+
+    primary_location = categories.get("location")
+    location_raw = primary_location if isinstance(primary_location, str) and primary_location else None
+
+    locations: list[Location] = []
+    all_locations = categories.get("allLocations")
+    if isinstance(all_locations, list) and all_locations:
+        for entry in all_locations:
+            if isinstance(entry, str) and entry:
+                is_remote = bool(re.search(r"\bremote\b", entry, re.I))
+                locations.append(Location(raw=entry, is_remote=is_remote))
+    elif location_raw:
+        is_remote = bool(re.search(r"\bremote\b", location_raw, re.I))
+        locations = [Location(raw=location_raw, is_remote=is_remote)]
+
+    workplace_type: WorkplaceType | None = None
+    workplace_type_raw = payload.get("workplaceType")
+    if isinstance(workplace_type_raw, str):
+        workplace_type = _LEVER_WORKPLACE_TYPE_MAP.get(workplace_type_raw.strip().lower())
+
+    if workplace_type is None and location_raw:
+        if re.search(r"\bremote\b", location_raw, re.I):
+            workplace_type = WorkplaceType.REMOTE
+        elif re.search(r"\bhybrid\b", location_raw, re.I):
+            workplace_type = WorkplaceType.HYBRID
+    workplace_type = _resolve_hybrid_override(workplace_type, description_text)
+
+    remote_scope = _extract_remote_scope(location_raw)
+    _apply_remote_flag(locations, workplace_type, remote_scope)
+
+    return location_raw, locations, workplace_type, remote_scope
+
+
+_ASHBY_WORKPLACE_TYPE_MAP: dict[str, WorkplaceType] = {
+    "remote": WorkplaceType.REMOTE,
+    "hybrid": WorkplaceType.HYBRID,
+    "onsite": WorkplaceType.ONSITE,
+}
+
+
+def _parse_location_ashby(
+    payload: dict[str, Any], description_text: str
+) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
+    """Ashby's `location` is a flat string; `secondaryLocations` holds any
+    additional ones. `workplaceType` and the boolean `isRemote` are direct
+    structured signals, preferred over the regex fallback. Every board
+    observed live during this build had an empty `secondaryLocations`, so its
+    populated shape (plain strings vs. `{"location": ...}` objects) is
+    handled defensively rather than from a verified example — flagging that
+    explicitly rather than overclaiming certainty.
+    """
+    primary = payload.get("location")
+    location_raw = primary if isinstance(primary, str) and primary else None
+
+    locations: list[Location] = []
+    if location_raw:
+        is_remote = bool(payload.get("isRemote")) or bool(re.search(r"\bremote\b", location_raw, re.I))
+        locations.append(Location(raw=location_raw, is_remote=is_remote))
+
+    secondary = payload.get("secondaryLocations")
+    if isinstance(secondary, list):
+        for entry in secondary:
+            name = entry if isinstance(entry, str) else (entry.get("location") if isinstance(entry, dict) else None)
+            if isinstance(name, str) and name:
+                is_remote = bool(re.search(r"\bremote\b", name, re.I))
+                locations.append(Location(raw=name, is_remote=is_remote))
+
+    workplace_type: WorkplaceType | None = None
+    workplace_type_raw = payload.get("workplaceType")
+    if isinstance(workplace_type_raw, str):
+        workplace_type = _ASHBY_WORKPLACE_TYPE_MAP.get(workplace_type_raw.strip().lower())
+    if workplace_type is None and payload.get("isRemote") is True:
+        workplace_type = WorkplaceType.REMOTE
+
+    if workplace_type is None and location_raw:
+        if re.search(r"\bremote\b", location_raw, re.I):
+            workplace_type = WorkplaceType.REMOTE
+        elif re.search(r"\bhybrid\b", location_raw, re.I):
+            workplace_type = WorkplaceType.HYBRID
+    workplace_type = _resolve_hybrid_override(workplace_type, description_text)
+
+    remote_scope = _extract_remote_scope(location_raw)
+    _apply_remote_flag(locations, workplace_type, remote_scope)
+
+    return location_raw, locations, workplace_type, remote_scope
+
+
+def _parse_location(
+    platform: str, payload: dict[str, Any], description_text: str
+) -> tuple[str | None, list[Location], WorkplaceType | None, str | None]:
+    if platform == AtsPlatform.GREENHOUSE:
+        return _parse_location_greenhouse(payload, description_text)
+    if platform == AtsPlatform.LEVER:
+        return _parse_location_lever(payload, description_text)
+    if platform == AtsPlatform.ASHBY:
+        return _parse_location_ashby(payload, description_text)
+    return _parse_location_schema_org(payload, description_text)
+
+
 # --- Employment type + compensation (spec §7.5) ---
 _EMPLOYMENT_TYPE_MAP: dict[str, EmploymentType] = {
     "FULL_TIME": EmploymentType.FULL_TIME,
@@ -253,6 +481,44 @@ def _map_employment_type(value: Any) -> EmploymentType | None:  # noqa: ANN401 �
     if not isinstance(value, str):
         return None
     return _EMPLOYMENT_TYPE_MAP.get(value.upper())
+
+
+_LEVER_EMPLOYMENT_TYPE_MAP: dict[str, EmploymentType] = {
+    "full time": EmploymentType.FULL_TIME,
+    "part time": EmploymentType.PART_TIME,
+    "contract": EmploymentType.CONTRACT,
+    "temporary": EmploymentType.CONTRACT,
+    "internship": EmploymentType.INTERNSHIP,
+    "intern": EmploymentType.INTERNSHIP,
+}
+
+_ASHBY_EMPLOYMENT_TYPE_MAP: dict[str, EmploymentType] = {
+    "fulltime": EmploymentType.FULL_TIME,
+    "parttime": EmploymentType.PART_TIME,
+    "contract": EmploymentType.CONTRACT,
+    "intern": EmploymentType.INTERNSHIP,
+    "internship": EmploymentType.INTERNSHIP,
+}
+
+
+def _extract_employment_type(platform: str, payload: dict[str, Any]) -> EmploymentType | None:
+    if platform == AtsPlatform.LEVER:
+        categories = payload.get("categories") if isinstance(payload.get("categories"), dict) else {}
+        commitment = categories.get("commitment")
+        if isinstance(commitment, str):
+            return _LEVER_EMPLOYMENT_TYPE_MAP.get(commitment.strip().lower())
+        return None
+
+    if platform == AtsPlatform.ASHBY:
+        value = payload.get("employmentType")
+        if isinstance(value, str):
+            return _ASHBY_EMPLOYMENT_TYPE_MAP.get(value.strip().lower())
+        return None
+
+    # Greenhouse exposes no employment-type field in the observed shape —
+    # falls through here and correctly returns None. JSON-LD keeps its
+    # existing schema.org enum handling, unchanged.
+    return _map_employment_type(payload.get("employmentType"))
 
 
 def _extract_compensation(base_salary: Any) -> Compensation | None:  # noqa: ANN401
@@ -294,7 +560,49 @@ def _clean_description(description_html: str) -> tuple[str, str]:
 
 
 # --- posted_at inference (spec §7.7) ---
-def _infer_posted_at(payload: dict[str, Any], fetched_at: datetime) -> tuple[datetime | None, bool, Provenance]:
+def _native_posted_at_field(platform: str, payload: dict[str, Any]) -> tuple[Any, str]:
+    """Each ATS's own authoritative posting-date field — spec §7.7 step 1:
+    "Use the ATS-native field if present (authoritative)". Returns the raw
+    value plus a provenance label; step 2 (JSON-LD `datePosted`) and step 3
+    (inference) are handled by the caller, unchanged.
+    """
+    if platform == AtsPlatform.GREENHOUSE:
+        # Not `updated_at` — that's a last-modified timestamp, not a posting date.
+        return payload.get("first_published"), "greenhouse_first_published"
+    if platform == AtsPlatform.LEVER:
+        return payload.get("createdAt"), "lever_createdAt"
+    if platform == AtsPlatform.ASHBY:
+        return payload.get("publishedAt"), "ashby_publishedAt"
+    return None, ""
+
+
+def _parse_native_posted_at(platform: str, value: Any) -> datetime | None:  # noqa: ANN401
+    if platform == AtsPlatform.LEVER:
+        # Lever's createdAt is epoch milliseconds, not an ISO string.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return datetime.fromtimestamp(value / 1000, tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                return None
+        return None
+
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _infer_posted_at(
+    platform: str, payload: dict[str, Any], fetched_at: datetime
+) -> tuple[datetime | None, bool, Provenance]:
+    native_value, native_source = _native_posted_at_field(platform, payload)
+    if native_value is not None:
+        parsed = _parse_native_posted_at(platform, native_value)
+        if parsed is not None:
+            return parsed, False, Provenance(source=native_source, confidence=0.95, derived_at=datetime.now(UTC))
+
     date_posted = payload.get("datePosted")
     if isinstance(date_posted, str):
         try:
@@ -362,25 +670,25 @@ def normalize(raw: RawPosting) -> JobPosting:
         return _degraded_posting(raw)
 
     payload = raw.raw_payload
+    platform = raw.source_platform
 
-    title_raw = str(payload.get("title") or "").strip()
+    title_raw = _extract_title(platform, payload)
     title_canonical = _canonicalize_title(title_raw)
 
-    department_raw = payload.get("department")
-    department_raw = department_raw if isinstance(department_raw, str) else None
+    department_raw = _extract_department(platform, payload)
 
     function, function_provenance = _classify_function(title_canonical, department_raw)
     seniority, seniority_provenance = _classify_seniority(title_canonical)
 
-    description_html = str(payload.get("description") or "")
+    description_html = _extract_description_html(platform, payload)
     description_text, description_markdown = _clean_description(description_html)
 
-    location_raw, locations, workplace_type, remote_scope = _parse_location(payload, description_text)
+    location_raw, locations, workplace_type, remote_scope = _parse_location(platform, payload, description_text)
 
-    employment_type = _map_employment_type(payload.get("employmentType"))
+    employment_type = _extract_employment_type(platform, payload)
     compensation = _extract_compensation(payload.get("baseSalary"))
 
-    posted_at, posted_at_is_inferred, posted_at_provenance = _infer_posted_at(payload, raw.fetched_at)
+    posted_at, posted_at_is_inferred, posted_at_provenance = _infer_posted_at(platform, payload, raw.fetched_at)
 
     job_id = _derive_job_id(raw, title_canonical, department_raw)
 
