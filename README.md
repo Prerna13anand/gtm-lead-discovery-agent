@@ -3,9 +3,9 @@
 Implementation of the pipeline described in [`JOB_SCRAPING_AGENT.md`](JOB_SCRAPING_AGENT.md). That document is the
 engineering specification; this README describes only what is actually built so far.
 
-## Status: Phase 1 normalisation core complete
+## Status: Phase 1 complete (per spec §22's own Phase 1 scope)
 
-Phase 1 built the project foundation and **Part I — Job Discovery** (spec §4–§7):
+Phase 1 built the project foundation and **Part I — Job Discovery** (spec §4–§7, §15.1, §19.1):
 
 - Project structure, configuration, logging
 - Stage 1 — Source Resolution (spec §4): homepage-link and path-probe strategies, manual override
@@ -14,31 +14,40 @@ Phase 1 built the project foundation and **Part I — Job Discovery** (spec §4�
   Ashby adapters are real** (Phases 2A/2B/2C), against each platform's public job-board API; the generic-HTML
   fallback is still a placeholder.
 - Stage 4 — Normalisation (spec §7): title canonicalisation, location parsing, rules-based function/seniority
-  classification, `posted_at` inference — **now platform-aware**, dispatching on `RawPosting.source_platform`
-  to read each ATS's native field names (title, description, location, department, employment type,
-  `posted_at`), per spec §7's own goal statement ("`RawPosting` (platform-shaped) → `JobPosting`") and the
-  explicit "ATS-native field" language in §7.5 and §7.7. JSON-LD's behaviour is unchanged — it's one dispatch
-  branch among four now, not the only path.
+  classification, `posted_at` inference — platform-aware, dispatching on `RawPosting.source_platform` to read
+  each ATS's native field names, per spec §7's own goal statement and the explicit "ATS-native field" language
+  in §7.5 and §7.7. JSON-LD's behaviour is unchanged — it's one dispatch branch among four.
+- **`scrape_run` ledger** (spec §15.1): one JSONL-persisted row per company per execution attempt, recording
+  status, timestamps, adapter used, job count, request/byte counts, and a raw-payload archive reference.
+  Recorded for *every* attempt, including Stage 1 failures — a company that couldn't be scraped stays visible
+  rather than silently disappearing (spec §2.3). See `core/run_ledger.py`.
+- **Basic coverage metrics** (spec §19.1): scrape success rate, source resolution rate, ATS coverage, degraded
+  extraction rate, and unscraped count — all computed directly from the `scrape_run` ledger. See
+  `core/metrics.py` and `python main.py metrics` below.
 - Placeholder service modules for Azure OpenAI (config/init only), Apollo, PDL, and Tavily — no integration logic
+
+This closes out every item spec §22 names under "Phase 1 — Prove the ATS thesis." The exit criterion itself
+(>60% of the target list scraped, >95% golden-set accuracy) isn't something this codebase can satisfy on its
+own — it needs a real target company list and a hand-labelled golden set, both explicit inputs per §1.6/§19.4,
+not something this agent generates.
 
 **Not yet built:** lead discovery, matching, enrichment, company context, scoring, ranking, publication,
 change detection/identity (spec §8), a real fetch-layer politeness stack (robots.txt, conditional requests,
-per-domain rate limiting), real generic-HTML extraction, the `scrape_run` ledger and basic coverage metrics
-(the two remaining named items in the spec's own §22 Phase 1 scope). See inline `TODO` markers and module
-docstrings for what's deferred and to which phase, and **Known limitations / follow-ups** below for what's
-still intentionally out of scope.
+per-domain rate limiting), and real generic-HTML extraction — all spec §22 Phase 2+ work. See inline `TODO`
+markers and module docstrings for what's deferred and to which phase, and **Known limitations / follow-ups**
+below for what's still intentionally out of scope within what's built.
 
 ## Project layout
 
 ```
 src/gtm_agent/
 ├── config/       # environment-backed settings
-├── core/         # logging, async HTTP fetch layer
-├── models/       # canonical Pydantic domain models (CareersSource, JobPosting, ...)
+├── core/         # logging, async HTTP fetch layer, scrape_run ledger, coverage metrics
+├── models/       # canonical Pydantic domain models (CareersSource, JobPosting, ScrapeRun, ...)
 ├── discovery/    # Stages 1-4: source resolution, ATS fingerprinting, extraction, normalisation
 │   └── extraction/   # BoardAdapter interface + per-platform adapters
 └── services/     # placeholder clients: azure_openai, apollo, pdl, tavily
-main.py           # CLI entry point
+main.py           # CLI entry point (discover, metrics)
 ```
 
 ## Setup
@@ -59,7 +68,26 @@ python main.py discover --domain example.com --name "Example Inc"
 This runs Stages 1–4 for a single company and prints the resulting job postings (or the typed failure state
 if resolution/extraction doesn't succeed). Real Greenhouse-, Lever-, and Ashby-hosted companies now all
 return real postings with title, location, workplace type, department, employment type (where the platform
-exposes one), and a real (non-inferred) `posted_at` populated correctly per platform.
+exposes one), and a real (non-inferred) `posted_at` populated correctly per platform. Every invocation also
+records one row in the `scrape_run` ledger (`.data/scrape_runs.jsonl` by default) and prints a summary of it,
+regardless of where the run terminated.
+
+```bash
+python main.py metrics
+```
+
+Prints the spec §19.1 coverage metrics (scrape success rate, source resolution rate, ATS coverage, degraded
+extraction rate, unscraped count), computed from every run recorded in the ledger so far. Sample output after
+a handful of `discover` runs across all three real ATS platforms plus one genuine failure:
+
+```
+== Coverage metrics (spec §19.1) ==
+  scrape success rate:      83.3%  (5/6 runs)
+  source resolution rate:   75.0%  (3/4 companies)
+  ATS coverage:             100.0%  (3/3 resolved companies)
+  degraded extraction rate: 0.0%  (0/5 successful runs)
+  unscraped count:          1  (absolute, never a percentage — spec §19.1)
+```
 
 ## Known limitations / follow-ups
 
@@ -95,6 +123,25 @@ re-fetches the source URL once to re-derive the same redirect target Stage 2 alr
 now since there's no persistent `careers_source.ats_board_token` store yet (spec §15.1 models the token as
 living on the same row as the careers source); worth revisiting once a real orchestrator persists Stage 2
 output back onto the source record instead of recomputing it.
+
+**Coverage metrics (`core/metrics.py`) read two spec §19.1 definitions literally rather than with inferred
+nuance.** Both choices are documented in the module's own docstring, but worth surfacing here too:
+
+- **"Unscraped count"** is defined as "Companies in a **non-success** terminal state" — implemented as
+  literally `status != SUCCESS`. A more elaborate reading could exclude `parse_degraded`/`partial`, since
+  spec §17's *downstream* column calls those "published" rather than truly unscraped — but that distinction
+  belongs to a different column of a different table, and isn't what this metric's own definition says.
+- **"Degraded extraction rate"'s** denominator, "successful", is read as `status == SUCCESS` specifically —
+  not "success-or-degraded". `parse_degraded` is its own distinct terminal `ScrapeRunStatus`, never a variant
+  of `success`, in this ledger.
+
+Neither choice changes any current output: `parse_degraded` isn't reachable yet (the generic-HTML adapter
+that would produce it is a Phase 2 placeholder), so that numerator is always 0 today regardless.
+
+Also: **"Source resolution rate" and "ATS coverage" are computed over each company's most recent run**, not
+every historical attempt — a company retried after an earlier failure is counted by its current state, not
+its past churn. "Scrape success rate" and "Degraded extraction rate", by contrast, are computed over *every*
+closed run, matching the spec's own "runs" (not "companies") wording for those two.
 
 ## Design reference
 

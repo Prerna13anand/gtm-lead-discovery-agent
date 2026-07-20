@@ -52,6 +52,7 @@ import click  # noqa: E402
 
 from gtm_agent.core.fetch import Fetcher  # noqa: E402
 from gtm_agent.core.logging import configure_logging, get_logger  # noqa: E402
+from gtm_agent.core.metrics import CoverageMetrics, compute_coverage_metrics  # noqa: E402
 from gtm_agent.core.run_ledger import ScrapeRunLedger, archive_raw_payloads  # noqa: E402
 from gtm_agent.discovery.ats_detection import identify_ats, route_extraction  # noqa: E402
 from gtm_agent.discovery.extraction import get_adapter  # noqa: E402
@@ -265,6 +266,40 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
             raw_payload_ref=raw_payload_ref,
         )
         _print_run_summary(run)
+
+
+def _fmt_rate(rate: float | None) -> str:
+    return "n/a (no data)" if rate is None else f"{rate:.1%}"
+
+
+@cli.command()
+def metrics() -> None:
+    """Print Phase 1 coverage metrics computed from the scrape_run ledger (spec §19.1)."""
+    ledger = ScrapeRunLedger()
+    runs = ledger.list_runs()
+    result: CoverageMetrics = compute_coverage_metrics(runs)
+
+    click.echo("== Coverage metrics (spec §19.1) ==")
+    click.echo(
+        f"  scrape success rate:      {_fmt_rate(result.scrape_success_rate)}"
+        f"  ({result.successful_runs}/{result.attempted_runs} runs)"
+    )
+    click.echo(
+        f"  source resolution rate:   {_fmt_rate(result.source_resolution_rate)}"
+        f"  ({result.resolved_companies}/{result.total_companies} companies)"
+    )
+    click.echo(
+        f"  ATS coverage:             {_fmt_rate(result.ats_coverage)}"
+        f"  ({result.ats_matched_companies}/{result.resolved_companies} resolved companies)"
+    )
+    click.echo(
+        f"  degraded extraction rate: {_fmt_rate(result.degraded_extraction_rate)}"
+        f"  ({result.degraded_runs}/{result.successful_runs} successful runs)"
+    )
+    click.echo(
+        f"  unscraped count:          {result.unscraped_count}"
+        "  (absolute, never a percentage — spec §19.1)"
+    )
 
 
 if __name__ == "__main__":
