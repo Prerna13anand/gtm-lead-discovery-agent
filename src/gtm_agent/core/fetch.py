@@ -107,20 +107,33 @@ class Fetcher:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def get(self, url: str, **kwargs: object) -> FetchResult:
-        return await self._request("GET", url, **kwargs)
+    async def get(self, url: str, *, use_cache: bool = True, **kwargs: object) -> FetchResult:
+        return await self._request("GET", url, use_cache=use_cache, **kwargs)
 
-    async def head(self, url: str, **kwargs: object) -> FetchResult:
-        return await self._request("HEAD", url, **kwargs)
+    async def head(self, url: str, *, use_cache: bool = True, **kwargs: object) -> FetchResult:
+        return await self._request("HEAD", url, use_cache=use_cache, **kwargs)
 
-    async def post(self, url: str, **kwargs: object) -> FetchResult:
-        return await self._request("POST", url, **kwargs)
+    async def post(self, url: str, *, use_cache: bool = True, **kwargs: object) -> FetchResult:
+        return await self._request("POST", url, use_cache=use_cache, **kwargs)
 
-    async def _request(self, method: str, url: str, **kwargs: object) -> FetchResult:
+    async def _request(self, method: str, url: str, *, use_cache: bool = True, **kwargs: object) -> FetchResult:
         # TODO(phase 2): consult robots.txt cache before issuing the request (spec §21.1)
         # TODO(phase 2): acquire a per-domain semaphore before issuing the request (spec §16.3)
 
-        conditional_headers = self._conditional_headers(url)
+        # `use_cache=False` opts a single call out of conditional requests
+        # entirely — neither sending stored validators nor storing new ones
+        # from the response. This exists for exploratory reads of the same
+        # URL a caller makes for a *different* purpose than the "real" fetch
+        # spec §6.3's conditional caching is meant to protect (e.g. Stage 2
+        # fingerprinting peeking at a page before Stage 3 extracts from it,
+        # spec §16.1's own `process_company` pseudocode: distinct pipeline
+        # steps, same URL). Without this, two same-process reads of one URL
+        # for two different purposes make the *second* one see a 304 the
+        # server only meant for a genuine later sweep — a real, live-verified
+        # bug (see `discovery.ats_detection.identify_ats` and `main.py`'s
+        # Stage 2/3 handoff) where a company's own fingerprinting read
+        # silently starved its extraction read of real content.
+        conditional_headers = self._conditional_headers(url) if use_cache else {}
         if conditional_headers:
             merged_headers = {**conditional_headers, **(kwargs.pop("headers", None) or {})}
             kwargs["headers"] = merged_headers
@@ -140,7 +153,7 @@ class Fetcher:
             self.request_count += 1
             self.bytes_fetched += len(response.content)
 
-            if response.status_code < 400:
+            if response.status_code < 400 and use_cache:
                 # Errors don't get to overwrite a validator that pointed at good content.
                 self._store_validators(url, response.headers)
 

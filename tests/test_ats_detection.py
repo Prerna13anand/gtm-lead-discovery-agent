@@ -3,8 +3,10 @@
 import asyncio
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 
+from gtm_agent.core.fetch import Fetcher
 from gtm_agent.discovery.ats_detection import (
     has_job_like_content,
     has_jsonld_job_posting,
@@ -186,3 +188,29 @@ def test_route_extraction_prefers_jsonld_over_rendered_dom():
         '<script type="application/ld+json">{"@type": "JobPosting"}</script>'
     )
     assert route_extraction(None, page_html=html) == AtsPlatform.JSONLD
+
+
+# --- Regression: identify_ats's fingerprinting fetch must not starve a
+# later, real fetch of the same URL (live-verified bug — see
+# core.fetch.Fetcher._request's use_cache docstring) ---
+
+
+async def test_identify_ats_fetch_does_not_leave_a_stored_validator_for_later_reads():
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A page with no ATS signal at all, so identify_ats falls through to
+        # its Signal-2 fetch instead of taking the decisive host-match shortcut.
+        return httpx.Response(200, text="<html><body>plain company site</body></html>", headers={"ETag": '"v1"'})
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    try:
+        source = _source("https://acme.com/careers")
+        await identify_ats(source, fetcher)
+
+        # A later "real" read of the same URL (e.g. Stage 3's own fetch)
+        # must see the full body, not a 304 caused by identify_ats's read.
+        result = await fetcher.get("https://acme.com/careers")
+    finally:
+        await fetcher.aclose()
+
+    assert result.status_code == 200
+    assert "plain company site" in result.text

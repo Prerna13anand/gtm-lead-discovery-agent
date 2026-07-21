@@ -43,9 +43,12 @@ rather than hidden:
       absence of data, not a gap in this normalizer.
     - `job_id` derivation implements the §8.1 identity ladder (ATS-native ID,
       canonical URL, content hash) because `JobPosting.job_id` is required —
-      but this is *not* Stage 5. There is no diffing against a previous run,
-      no lifecycle (OPEN/MISSING/CLOSED), and no event emission here; that's
-      Phase 2 (spec §8).
+      but this module still isn't Stage 5 itself. There is no diffing
+      against a previous run, no lifecycle (OPEN/MISSING/CLOSED), and no
+      event emission here; that's `discovery.lifecycle`, which reuses
+      `identity_strategy_for` below (mirroring `_derive_job_id`'s own
+      precedence) to record which ladder rung produced each `job_id`,
+      exactly as spec §8.1 asks: "identity strategy is recorded per job."
 """
 
 from __future__ import annotations
@@ -68,6 +71,7 @@ from gtm_agent.models.common import (
     WorkplaceType,
 )
 from gtm_agent.models.job import JobPosting, RawPosting
+from gtm_agent.models.lifecycle import IdentityStrategy
 
 # --- Title canonicalisation (spec §7.2) ---
 _EMOJI_RE = re.compile(
@@ -677,6 +681,25 @@ def _derive_job_id(raw: RawPosting, title_canonical: str, department_raw: str | 
     basis = f"{raw.company_id}|{title_canonical}|{department_raw or ''}"
     digest = hashlib.sha256(basis.encode()).hexdigest()[:16]
     return f"{raw.company_id}:hash:{digest}"
+
+
+def identity_strategy_for(raw: RawPosting) -> IdentityStrategy:
+    """Which rung of the §8.1 ladder `_derive_job_id` used for this posting.
+
+    Spec §8.1: "Identity strategy is recorded per job, because it determines
+    how much to trust the change signal" — that recording happens in Stage 5
+    (`discovery.lifecycle`), not here, since `JobPosting` (§7.1) itself has no
+    `identity_strategy` field (spec §15.1 adds it at the persisted
+    `job_posting` table layer, on top of `JobPosting`, not into it). This
+    function exists so Stage 5 doesn't have to duplicate the identity-ladder
+    branching to know which rung produced a given `job_id` — it just mirrors
+    `_derive_job_id`'s own precedence and must be kept in sync with it.
+    """
+    if raw.source_job_id:
+        return IdentityStrategy.ATS_NATIVE_ID
+    if raw.posting_url:
+        return IdentityStrategy.CANONICAL_URL
+    return IdentityStrategy.CONTENT_HASH
 
 
 def _degraded_posting(raw: RawPosting) -> JobPosting:

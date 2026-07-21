@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from gtm_agent.core.fetch import FetchError, FetchResult
+from gtm_agent.core.fetch import FetchError, FetchResult, Fetcher
 from gtm_agent.discovery.source_resolution import (
     SitemapStrategy,
     TavilySearchStrategy,
+    _fetch_and_validate,
     resolve_source,
 )
 from gtm_agent.models.careers_source import ResolutionStrategy
@@ -451,3 +452,26 @@ async def test_low_confidence_unrestricted_match_needs_review_through_resolve_so
     assert result.value is not None
     assert result.value.resolution_strategy == ResolutionStrategy.TAVILY_SEARCH
     assert result.value.resolution_confidence == 0.40
+
+
+# --- Regression: a validation fetch must not leave a stored validator that
+# starves a later, real fetch of the same URL (live-verified bug — see
+# core.fetch.Fetcher._request's use_cache docstring) ---
+
+
+async def test_fetch_and_validate_does_not_leave_a_stored_validator_for_later_reads():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_CAREERS_PAGE_HTML, headers={"ETag": '"v1"'})
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    try:
+        assert await _fetch_and_validate("https://acme.com/careers", fetcher) is True
+
+        # A later "real" read of the same URL (e.g. Stage 2/3's own fetch,
+        # once this URL becomes source.careers_url) must see the full body.
+        result = await fetcher.get("https://acme.com/careers")
+    finally:
+        await fetcher.aclose()
+
+    assert result.status_code == 200
+    assert result.text == _CAREERS_PAGE_HTML

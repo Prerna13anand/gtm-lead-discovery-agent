@@ -1,15 +1,25 @@
 #!/usr/bin/env python
-"""CLI entry point — runs Stages 1-4 for a single company (spec §3.2, Part I).
+"""CLI entry point — runs Stages 1-5 for a single company (spec §3.2, Part I).
 
 This is a development/demo harness, not the sweep orchestrator described in
 spec §16 (which is later-phase work — no scheduling, no concurrency across
-companies). It exists to prove the Part I pipeline is wired correctly end to
-end: source resolution -> ATS fingerprinting -> extraction -> normalisation
--> scrape_run ledger.
+companies, no cadence tiering). It exists to prove the Part I pipeline is
+wired correctly end to end: source resolution -> ATS fingerprinting ->
+extraction -> normalisation -> change detection & lifecycle -> scrape_run
+ledger.
 
 Every invocation records exactly one `ScrapeRun` (spec §15.1) regardless of
 where it terminates — a Stage 1 failure is still "one company per attempt",
 not a silent non-event (spec §2.3). See core/run_ledger.py.
+
+Stage 5 (spec §8) persists lifecycle state across invocations via
+`core.lifecycle_store` — unlike `ScrapeRunLedger`, which is a pure append log
+never read back mid-flow, `JobPostingStore.current_records` is read at the
+*start* of Stage 5 specifically so this run can diff against the last one.
+Because this harness has no scheduler, "the last run" means the last time
+this exact CLI command was invoked for this company — a real sweep (spec
+§16) would call the same Stage 5 functions with the same semantics, just on
+a schedule instead of on demand.
 """
 
 import asyncio
@@ -50,12 +60,17 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import click  # noqa: E402
 
+from gtm_agent.core.canary_store import CanaryFindingLog, CanaryResultLog  # noqa: E402
 from gtm_agent.core.fetch import Fetcher  # noqa: E402
+from gtm_agent.core.lifecycle_store import JobPostingStore, JobPostingVersionLedger, ScrapeEventLog  # noqa: E402
 from gtm_agent.core.logging import configure_logging, get_logger  # noqa: E402
 from gtm_agent.core.metrics import CoverageMetrics, compute_coverage_metrics  # noqa: E402
 from gtm_agent.core.run_ledger import ScrapeRunLedger, archive_raw_payloads  # noqa: E402
 from gtm_agent.discovery.ats_detection import identify_ats, route_extraction  # noqa: E402
+from gtm_agent.discovery.canary import run_canary_suite  # noqa: E402
+from gtm_agent.discovery.canary_targets import CANARY_TARGETS  # noqa: E402
 from gtm_agent.discovery.extraction import get_adapter  # noqa: E402
+from gtm_agent.discovery.lifecycle import ZeroJobsDecision, previously_open_count, run_stage5  # noqa: E402
 from gtm_agent.discovery.normalization import normalize_batch  # noqa: E402
 from gtm_agent.discovery.source_resolution import resolve_source  # noqa: E402
 from gtm_agent.models.ats import AtsPlatform  # noqa: E402
@@ -221,7 +236,13 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
 
         click.echo("\n== Stage 3: Extraction ==")
         try:
-            page = await fetcher.get(source.careers_url)
+            # `use_cache=False`: this routing peek and Stage 2's own
+            # fingerprinting fetch both read `source.careers_url` moments
+            # before the chosen adapter reads it again for real — without
+            # opting out of conditional caching here, that third read can
+            # see a spurious 304 (a live-verified bug; see
+            # `core.fetch.Fetcher._request`'s docstring).
+            page = await fetcher.get(source.careers_url, use_cache=False)
             page_html: str | None = page.text
         except Exception:  # noqa: BLE001 — best-effort fetch for routing only
             page_html = None
@@ -276,6 +297,60 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
             click.echo(f"      posted_at: {job.posted_at} (inferred={job.posted_at_is_inferred})")
             click.echo(f"      degraded: {job.is_degraded}  confidence: {job.extraction_confidence:.2f}")
 
+        # ---- Stage 5: Change Detection & Identity (spec §8) ---------------
+        click.echo("\n== Stage 5: Change Detection & Identity ==")
+        job_posting_store = JobPostingStore()
+        version_ledger = JobPostingVersionLedger()
+        event_log = ScrapeEventLog()
+
+        previous_records = job_posting_store.current_records(company.id)
+        prior_runs = ledger.list_runs(company_id=company.id)  # this run isn't closed/appended yet
+
+        outcome = run_stage5(
+            company_id=company.id,
+            run_id=run.id,
+            observed_at=datetime.now(UTC),
+            raw_postings=raw_postings,
+            job_postings=job_postings,
+            previous_records=previous_records,
+            prior_runs=prior_runs,
+        )
+
+        if outcome.decision == ZeroJobsDecision.HOLD_FOR_REVIEW:
+            click.echo(
+                "  zero_jobs_suspicious: 0 jobs found where jobs were previously open — "
+                "holding for review, not publishing (spec §17.1)"
+            )
+            requests_made, bytes_made = _counts()
+            run = ledger.close_run(
+                run,
+                status=ScrapeRunStatus.ZERO_JOBS_SUSPICIOUS,
+                failure_detail=(
+                    f"0 jobs found; {previously_open_count(previous_records)} were open as of the "
+                    "last successful scrape — held for review pending re-verification (spec §17.1)"
+                ),
+                adapter_used=routed_platform.value,
+                http_requests_made=requests_made,
+                bytes_fetched=bytes_made,
+            )
+            _print_run_summary(run)
+            return
+
+        if outcome.decision == ZeroJobsDecision.CONFIRMED_BOARD_EMPTIED:
+            click.echo("  board_emptied: zero confirmed across two verified sweeps (spec §17.1 step 5)")
+
+        lifecycle_result = outcome.lifecycle
+        assert lifecycle_result is not None  # only None on HOLD_FOR_REVIEW, handled above
+        job_posting_store.save(lifecycle_result.records)
+        version_ledger.append(lifecycle_result.versions)
+        event_log.append(lifecycle_result.events)
+
+        if lifecycle_result.events:
+            for event in lifecycle_result.events:
+                click.echo(f"  - {event.event_type.value}" + (f"  job_id={event.job_id}" if event.job_id else ""))
+        else:
+            click.echo("  (no lifecycle events this run)")
+
         raw_payload_ref = None
         if raw_postings:
             raw_payload_ref = archive_raw_payloads(
@@ -328,6 +403,48 @@ def metrics() -> None:
         f"  unscraped count:          {result.unscraped_count}"
         "  (absolute, never a percentage — spec §19.1)"
     )
+
+
+@cli.command()
+def canary() -> None:
+    """Run the canary suite (spec §20.3) against the curated live target list.
+
+    Not scheduled here — this codebase has no scheduler (see this module's
+    docstring). Run this on a nightly cron/CI job for the "scraped nightly
+    against the live web" cadence spec §20.3 asks for; each invocation is
+    one complete, self-contained run.
+    """
+    asyncio.run(_canary())
+
+
+async def _canary() -> None:
+    result_log = CanaryResultLog()
+    finding_log = CanaryFindingLog()
+    previous_results = result_log.latest_per_target()
+
+    click.echo(f"== Canary Suite (spec §20.3): {len(CANARY_TARGETS)} targets ==")
+    async with Fetcher() as fetcher:
+        report = await run_canary_suite(CANARY_TARGETS, fetcher=fetcher, previous_results=previous_results)
+
+    result_log.append(report.results)
+    finding_log.append(report.findings)
+
+    findings_by_company = {f.company_id: f for f in report.findings}
+    for target, result in zip(CANARY_TARGETS, report.results, strict=True):
+        flag = "DRIFT" if target.company_id in findings_by_company else "ok"
+        click.echo(
+            f"  [{flag:5s}] {target.company_name:20s} platform={result.detected_platform.value:14s} "
+            f"status={result.extraction_status:16s} jobs={result.job_count}"
+        )
+
+    if report.findings:
+        click.echo(f"\n{len(report.findings)} finding(s) recorded (spec §20.3: informational, not build-blocking):")
+        for finding in report.findings:
+            click.echo(f"  - {finding.company_name} ({finding.company_id}):")
+            for reason in finding.reasons:
+                click.echo(f"      {reason}")
+    else:
+        click.echo("\nNo drift detected.")
 
 
 if __name__ == "__main__":

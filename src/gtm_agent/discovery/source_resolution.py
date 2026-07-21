@@ -215,7 +215,12 @@ def _in_footer_or_nav(anchor) -> bool:  # noqa: ANN001 — selectolax Node has n
 
 async def _fetch_and_validate(url: str, fetcher: Fetcher) -> bool:
     try:
-        result = await fetcher.get(url)
+        # use_cache=False: `url` becomes `source.careers_url` on success, and
+        # Stage 2/3 read that exact URL again moments later. Storing a
+        # validator from this exploratory validation read would make that
+        # later, real read see a spurious 304 instead of real content — a
+        # live-verified bug (see `core.fetch.Fetcher._request`'s docstring).
+        result = await fetcher.get(url, use_cache=False)
     except FetchError:
         return False
     if result.status_code >= 400:
@@ -235,7 +240,9 @@ class PathProbeStrategy:
 
             url = f"https://{company.domain}{path}"
             try:
-                head_result = await fetcher.head(url)
+                # use_cache=False: same reasoning as _fetch_and_validate —
+                # `url` becomes `source.careers_url` on success.
+                head_result = await fetcher.head(url, use_cache=False)
             except FetchError:
                 continue
 
@@ -243,14 +250,14 @@ class PathProbeStrategy:
             if status in (405, 501) or status == 200 and not head_result.text:
                 # HEAD unsupported or inconclusive — fall back to GET (spec §4.1)
                 try:
-                    get_result = await fetcher.get(url)
+                    get_result = await fetcher.get(url, use_cache=False)
                 except FetchError:
                     continue
                 status = get_result.status_code
                 body = get_result.text
             elif 200 <= status < 300:
                 try:
-                    get_result = await fetcher.get(url)
+                    get_result = await fetcher.get(url, use_cache=False)
                 except FetchError:
                     continue
                 body = get_result.text

@@ -201,3 +201,78 @@ async def test_caller_supplied_headers_are_preserved_alongside_conditional_heade
 
     assert seen_headers[1]["x-custom"] == "value"
     assert seen_headers[1]["if-none-match"] == '"abc123"'
+
+
+# --- use_cache=False (exploratory reads that must not collide with a later
+# real read of the same URL — see this parameter's docstring in fetch.py) ---
+
+
+async def test_use_cache_false_does_not_store_a_validator():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="board", headers={"ETag": '"abc123"'})
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    try:
+        await fetcher.get("https://example.com/board", use_cache=False)
+        result = await fetcher.get("https://example.com/board")  # default use_cache=True
+    finally:
+        await fetcher.aclose()
+
+    # The second (default) request must see a real body, not a 304 caused by
+    # a validator the first, exploratory request had no business storing.
+    assert result.status_code == 200
+    assert result.text == "board"
+
+
+async def test_use_cache_false_does_not_send_a_previously_stored_validator():
+    seen_headers: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(request.headers)
+        return httpx.Response(200, text="board", headers={"ETag": '"abc123"'})
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    try:
+        await fetcher.get("https://example.com/board")  # stores "abc123"
+        await fetcher.get("https://example.com/board", use_cache=False)
+    finally:
+        await fetcher.aclose()
+
+    assert "if-none-match" not in seen_headers[1]
+
+
+async def test_use_cache_false_still_returns_the_real_response_even_with_a_stored_validator():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, text=f"board-v{calls['n']}", headers={"ETag": '"abc123"'})
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    try:
+        await fetcher.get("https://example.com/board")  # stores "abc123"
+        result = await fetcher.get("https://example.com/board", use_cache=False)
+    finally:
+        await fetcher.aclose()
+
+    # A server that would 304 a conditional request still gets a plain
+    # request here, so this always sees a real (non-empty) body.
+    assert result.status_code == 200
+    assert result.text == "board-v2"
+
+
+async def test_default_use_cache_true_is_unaffected():
+    seen_headers: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(request.headers)
+        return httpx.Response(200, text="board", headers={"ETag": '"abc123"'})
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    try:
+        await fetcher.get("https://example.com/board")
+        await fetcher.get("https://example.com/board")
+    finally:
+        await fetcher.aclose()
+
+    assert seen_headers[1]["if-none-match"] == '"abc123"'

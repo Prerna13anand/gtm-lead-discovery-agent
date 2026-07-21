@@ -120,7 +120,15 @@ async def identify_ats(
         return StageResult(status=AtsFingerprintStatus.IDENTIFIED, value=identification)
 
     try:
-        result = await fetcher.get(source.careers_url)
+        # `use_cache=False`: this is an exploratory fingerprinting read, not
+        # the "real" content fetch spec §6.3's conditional caching exists to
+        # protect. Stage 3 (or this same routing step's own page_html peek —
+        # see `route_extraction` callers) reads this exact URL again
+        # moments later for extraction; if this read stored a validator,
+        # that next read would get a spurious 304 and see an empty body
+        # instead of the real page — a real, live-verified bug this
+        # parameter exists to prevent (see `core.fetch.Fetcher._request`).
+        result = await fetcher.get(source.careers_url, use_cache=False)
     except FetchError as exc:
         logger.info("ats_detection_fetch_failed", url=source.careers_url, error=str(exc))
         return StageResult(status=AtsFingerprintStatus.ATS_UNKNOWN, detail=str(exc))

@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     scrape_run_ledger_path: str = ".data/scrape_runs.jsonl"
     raw_payload_archive_dir: str = ".data/raw_payloads"
 
+    # --- Stage 5 lifecycle stores (spec §15.1) — same local-file pattern as the run ledger ---
+    job_posting_store_path: str = ".data/job_postings.jsonl"
+    job_posting_version_path: str = ".data/job_posting_versions.jsonl"
+    scrape_event_log_path: str = ".data/scrape_events.jsonl"
+
+    # --- Canary suite (spec §20.3) ---
+    canary_result_log_path: str = ".data/canary_results.jsonl"
+    canary_finding_log_path: str = ".data/canary_findings.jsonl"
+
     @property
     def azure_openai_configured(self) -> bool:
         """Whether enough Azure OpenAI config is present to initialise a client.
