@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from gtm_agent.core.metrics import compute_coverage_metrics
+from gtm_agent.core.metrics import compute_ats_unknown_frequency, compute_coverage_metrics
 from gtm_agent.models.scrape_run import ScrapeRun, ScrapeRunStatus
 
 _T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -155,3 +155,25 @@ def test_latest_run_wins_regardless_of_input_order():
 
     assert result.total_companies == 1
     assert result.unscraped_count == 1  # the newer, failing run reflects current state
+
+
+# --- compute_ats_unknown_frequency (spec §22 Phase 5, §19.6) ---------------
+
+
+def test_ats_unknown_frequency_counts_by_adapter_used():
+    runs = [
+        _run("a", ScrapeRunStatus.ATS_UNKNOWN, adapter_used="wellfound"),
+        _run("b", ScrapeRunStatus.ATS_UNKNOWN, adapter_used="wellfound"),
+        _run("c", ScrapeRunStatus.ATS_UNKNOWN, adapter_used="teamtailor"),
+        _run("d", ScrapeRunStatus.SUCCESS, adapter_used="greenhouse"),
+    ]
+    assert compute_ats_unknown_frequency(runs) == {"wellfound": 2, "teamtailor": 1}
+
+
+def test_ats_unknown_frequency_ignores_runs_with_no_adapter_identified():
+    runs = [_run("a", ScrapeRunStatus.ATS_UNKNOWN, adapter_used=None)]
+    assert compute_ats_unknown_frequency(runs) == {}
+
+
+def test_ats_unknown_frequency_empty_for_no_runs():
+    assert compute_ats_unknown_frequency([]) == {}

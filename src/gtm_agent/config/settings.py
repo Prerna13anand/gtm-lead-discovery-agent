@@ -52,6 +52,32 @@ class Settings(BaseSettings):
     canary_result_log_path: str = ".data/canary_results.jsonl"
     canary_finding_log_path: str = ".data/canary_findings.jsonl"
 
+    # --- Part II stores (spec §15.2) — same local-file pattern, no database yet ---
+    lead_store_path: str = ".data/leads.jsonl"
+    lead_discovery_run_path: str = ".data/lead_discovery_runs.jsonl"
+    lead_job_match_path: str = ".data/lead_job_matches.jsonl"
+    unmatched_job_path: str = ".data/unmatched_jobs.jsonl"
+    company_context_path: str = ".data/company_contexts.jsonl"
+    lead_feedback_path: str = ".data/lead_feedback.jsonl"
+
+    # --- Credit budget ceilings (spec §18.3) — per-sweep; no real figures
+    # are given by the spec (open question §23.14), so these are
+    # conservative defaults sized for the CLI demo harness, not a production
+    # allowance. See leads/budget.py.
+    apollo_credit_ceiling: int = 500
+    pdl_credit_ceiling: int = 500
+    tavily_call_ceiling: int = 500
+
+    # --- Part III stores (spec §15.2, §14) ---
+    scored_lead_path: str = ".data/scored_leads.jsonl"
+    publication_event_path: str = ".data/publication_events.jsonl"
+    gtm_lead_table_path: str = ".data/gtm_leads.jsonl"
+    gtm_lead_csv_path: str = ".data/gtm_leads.csv"
+
+    # --- Compliance (spec §21.6, Phase 5) ---
+    company_denylist_path: str = ".data/company_denylist.jsonl"
+    person_suppression_path: str = ".data/person_suppression.jsonl"
+
     @property
     def azure_openai_configured(self) -> bool:
         """Whether enough Azure OpenAI config is present to initialise a client.

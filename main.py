@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""CLI entry point — runs Stages 1-5 for a single company (spec §3.2, Part I).
+"""CLI entry point — runs Stages 1-9 for a single company (spec §3.2, Parts I-II).
 
 This is a development/demo harness, not the sweep orchestrator described in
 spec §16 (which is later-phase work — no scheduling, no concurrency across
-companies, no cadence tiering). It exists to prove the Part I pipeline is
-wired correctly end to end: source resolution -> ATS fingerprinting ->
-extraction -> normalisation -> change detection & lifecycle -> scrape_run
-ledger.
+companies, no cadence tiering). It exists to prove the pipeline is wired
+correctly end to end: source resolution -> ATS fingerprinting -> extraction
+-> normalisation -> change detection & lifecycle (Part I) -> lead discovery
+-> matching -> enrichment -> company context (Part II, Phase 3).
 
 Every invocation records exactly one `ScrapeRun` (spec §15.1) regardless of
 where it terminates — a Stage 1 failure is still "one company per attempt",
@@ -19,13 +19,19 @@ never read back mid-flow, `JobPostingStore.current_records` is read at the
 Because this harness has no scheduler, "the last run" means the last time
 this exact CLI command was invoked for this company — a real sweep (spec
 §16) would call the same Stage 5 functions with the same semantics, just on
-a schedule instead of on demand.
+a schedule instead of on demand. Part II (`_process_part2`) follows the
+identical convention: `LeadStore`/`CompanyContextStore` are read at the start
+of Stages 6/9 for the same reason.
+
+Part II only runs when Part I found at least one currently-open job (spec
+§16.1: "A Part I failure returns early. No jobs means nothing to match").
 """
 
 import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 # Windows consoles default stdout/stderr to a legacy codepage (e.g. cp1252),
 # which can't encode plenty of real, legitimate characters that show up in
@@ -62,10 +68,24 @@ import click  # noqa: E402
 
 from gtm_agent.core.canary_store import CanaryFindingLog, CanaryResultLog  # noqa: E402
 from gtm_agent.core.fetch import Fetcher  # noqa: E402
+from gtm_agent.config import get_settings  # noqa: E402
+from gtm_agent.core.compliance_store import CompanyDenylistStore, PersonSuppressionStore  # noqa: E402
+from gtm_agent.core.lead_store import (  # noqa: E402
+    CompanyContextStore,
+    LeadDiscoveryRunLedger,
+    LeadJobMatchStore,
+    LeadStore,
+    UnmatchedJobStore,
+)
 from gtm_agent.core.lifecycle_store import JobPostingStore, JobPostingVersionLedger, ScrapeEventLog  # noqa: E402
 from gtm_agent.core.logging import configure_logging, get_logger  # noqa: E402
-from gtm_agent.core.metrics import CoverageMetrics, compute_coverage_metrics  # noqa: E402
+from gtm_agent.core.metrics import (  # noqa: E402
+    CoverageMetrics,
+    compute_coverage_metrics,
+    compute_disagreement_rate,
+)
 from gtm_agent.core.run_ledger import ScrapeRunLedger, archive_raw_payloads  # noqa: E402
+from gtm_agent.core.scoring_store import GtmLeadStore, PublicationEventStore, ScoredLeadStore  # noqa: E402
 from gtm_agent.discovery.ats_detection import identify_ats, route_extraction  # noqa: E402
 from gtm_agent.discovery.canary import run_canary_suite  # noqa: E402
 from gtm_agent.discovery.canary_targets import CANARY_TARGETS  # noqa: E402
@@ -73,16 +93,29 @@ from gtm_agent.discovery.extraction import get_adapter  # noqa: E402
 from gtm_agent.discovery.lifecycle import ZeroJobsDecision, previously_open_count, run_stage5  # noqa: E402
 from gtm_agent.discovery.normalization import normalize_batch  # noqa: E402
 from gtm_agent.discovery.source_resolution import resolve_source  # noqa: E402
+from gtm_agent.leads.budget import CreditBudget  # noqa: E402
+from gtm_agent.leads.company_context import is_context_stale, run_stage9  # noqa: E402
+from gtm_agent.leads.compliance import filter_suppressed, suppression_key  # noqa: E402
+from gtm_agent.leads.discovery import needs_refresh, run_stage6  # noqa: E402
+from gtm_agent.leads.enrichment import run_stage8  # noqa: E402
+from gtm_agent.leads.matching import match as run_stage7  # noqa: E402
 from gtm_agent.models.ats import AtsPlatform  # noqa: E402
 from gtm_agent.models.company import Company  # noqa: E402
 from gtm_agent.models.job import RawPosting  # noqa: E402
+from gtm_agent.models.lead import LeadDiscoveryStatus, LeadRecord  # noqa: E402
+from gtm_agent.models.lifecycle import JobLifecycleStatus, JobPostingRecord  # noqa: E402
+from gtm_agent.models.matching import UnmatchedReason  # noqa: E402
 from gtm_agent.models.results import (  # noqa: E402
     AtsFingerprintStatus,
     ExtractionStatus,
     SourceResolutionStatus,
     StageResult,
 )
+from gtm_agent.models.scoring import ScoredLead, ScoringStatus  # noqa: E402
 from gtm_agent.models.scrape_run import ScrapeRun, ScrapeRunStatus  # noqa: E402
+from gtm_agent.scoring.publication import publish, publish_unmatched, write_csv  # noqa: E402
+from gtm_agent.scoring.ranking import rank  # noqa: E402
+from gtm_agent.scoring.rationale import PROMPT_VERSION, fallback_scored_lead, score_pair  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -139,7 +172,7 @@ def _final_run_status(extraction_status: ExtractionStatus) -> ScrapeRunStatus:
 
 @click.group()
 def cli() -> None:
-    """GTM Lead Discovery Agent — Phase 1 CLI."""
+    """GTM Lead Discovery Agent CLI (Phases 1-5)."""
     configure_logging()
 
 
@@ -174,6 +207,17 @@ def _print_run_summary(run: ScrapeRun) -> None:
 
 async def _discover(domain: str, company_name: str, manual_careers_url: str | None) -> None:
     company = Company(id=domain, name=company_name, domain=domain, added_at=datetime.now(UTC))
+
+    # Spec §21.6: "A domain denylist checked at stage 1, honoured
+    # immediately, never re-resolved." Checked before Stage 1 even begins —
+    # no `scrape_run` row is recorded for a denylisted company; it isn't an
+    # attempt that failed, it's a company excluded from scraping entirely
+    # by an operator decision, a different kind of absence than anything
+    # §17's failure taxonomy models.
+    if CompanyDenylistStore().is_denied(domain):
+        click.echo(f"'{domain}' is on the company denylist (spec §21.6) — skipping, not scraping.")
+        return
+
     ledger = ScrapeRunLedger()
 
     async with Fetcher() as fetcher:
@@ -370,6 +414,207 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
         )
         _print_run_summary(run)
 
+        # ---- Part II: leads, matching, enrichment, context (spec §§9-12) --
+        open_jobs = [
+            record for record in lifecycle_result.records if record.status == JobLifecycleStatus.OPEN
+        ]
+        if not open_jobs:
+            click.echo(
+                "\n(no open jobs — Part II skipped; spec §16.1: 'no jobs -> nothing to match')"
+            )
+            return
+
+        await _process_part2(company, open_jobs, fetcher)
+
+
+async def _process_part2(company: Company, open_jobs: list[JobPostingRecord], fetcher: Fetcher) -> None:
+    """Stages 6-9 (spec §§9-12) for one company's currently-open jobs.
+
+    Same "demo harness, not a real sweep" scope as the rest of this module
+    (see module docstring): one `CreditBudget` per invocation, not per
+    sweep across many companies (spec §18.3) — there is no multi-company
+    sweep for it to be shared across yet. `open_jobs` are `JobPostingRecord`
+    (Stage 5 output), which is itself a `JobPosting`, so every Stage 7-9
+    function that expects a `JobPosting` accepts them unchanged.
+    """
+    budget = CreditBudget.from_settings()
+    lead_store = LeadStore()
+    lead_run_ledger = LeadDiscoveryRunLedger()
+    match_store = LeadJobMatchStore()
+    unmatched_store = UnmatchedJobStore()
+    context_store = CompanyContextStore()
+    suppression_store = PersonSuppressionStore()
+
+    now = datetime.now(UTC)
+
+    # --- Stage 6: Lead Discovery (spec §9) ---------------------------------
+    click.echo("\n== Stage 6: Lead Discovery ==")
+    cached = lead_store.current_leads(company.id)
+    cached_leads: list[LeadRecord] = filter_suppressed(
+        list(cached.values()), company_domain=company.domain, suppression_store=suppression_store
+    )
+    cache_retrieved_at = min((lead.retrieved_at for lead in cached_leads), default=None)
+
+    if cached_leads and not needs_refresh(
+        cached_leads=cached_leads, cache_retrieved_at=cache_retrieved_at, open_jobs=open_jobs, now=now
+    ):
+        click.echo(f"  cache hit — {len(cached_leads)} lead(s), no Apollo sweep needed (spec §2.7, §3.3)")
+        leads = cached_leads
+        lead_status = LeadDiscoveryStatus.LEADS_OK
+    else:
+        run = lead_run_ledger.begin_run(company.id, started_at=now)
+        outcome = await run_stage6(
+            company=company, open_jobs=open_jobs, fetcher=fetcher, budget=budget, suppression_store=suppression_store
+        )
+        lead_run_ledger.close_run(
+            run,
+            status=outcome.status,
+            finished_at=datetime.now(UTC),
+            personas_requested=outcome.personas_requested,
+            leads_returned=len(outcome.leads),
+            apollo_credits_used=len(outcome.leads),
+            cache_hit=False,
+        )
+        click.echo(f"  status: {outcome.status.value}  leads_returned: {len(outcome.leads)}")
+        if outcome.detail:
+            click.echo(f"  detail: {outcome.detail}")
+        if outcome.leads:
+            lead_store.save(outcome.leads)
+        leads = outcome.leads if outcome.leads else cached_leads
+        lead_status = outcome.status
+
+    empty_leads_reason = {
+        LeadDiscoveryStatus.NO_LEADS_FOUND: UnmatchedReason.NO_LEADS_RETRIEVED,
+        LeadDiscoveryStatus.LEAD_DISCOVERY_FAILED: UnmatchedReason.LEAD_DISCOVERY_FAILED,
+        LeadDiscoveryStatus.BUDGET_EXHAUSTED: UnmatchedReason.LEAD_DISCOVERY_FAILED,
+        LeadDiscoveryStatus.COMPANY_IDENTITY_SUSPECT: UnmatchedReason.LEAD_DISCOVERY_FAILED,
+    }.get(lead_status, UnmatchedReason.NO_LEADS_RETRIEVED)
+
+    # --- Stage 7: Lead-Job Matching (spec §10) -----------------------------
+    click.echo("\n== Stage 7: Lead-Job Matching ==")
+    result = run_stage7(
+        company=company, leads=leads, jobs=open_jobs, run_id=str(uuid4()), computed_at=now,
+        empty_leads_reason=empty_leads_reason,
+    )
+    match_store.append(result.matches)
+    unmatched_store.append(result.unmatched)
+    if result.matches:
+        for m in sorted(result.matches, key=lambda m: (m.job_id, m.rank_within_job)):
+            click.echo(f"  job={m.job_id}  rank={m.rank_within_job}  lead={m.lead_id}  score={m.match_score:.2f}")
+    if result.unmatched:
+        for u in result.unmatched:
+            click.echo(f"  job={u.job_id}  UNMATCHED  reason={u.reason.value}")
+
+    # --- Stage 8: Enrichment (spec §11) ------------------------------------
+    click.echo("\n== Stage 8: Enrichment ==")
+    matched_lead_ids = {m.lead_id for m in result.matches}
+    if matched_lead_ids:
+        enriched = await run_stage8(
+            leads=leads, matched_lead_ids=matched_lead_ids, company=company, fetcher=fetcher, budget=budget
+        )
+        lead_store.save(enriched)
+        for lead in enriched:
+            if lead.lead_id in matched_lead_ids:
+                click.echo(f"  {lead.lead_id}: {lead.enrichment_status.value}")
+    else:
+        click.echo("  (no matched leads — nothing to enrich, spec §11.1)")
+
+    # --- Stage 9: Company Context (spec §12) -------------------------------
+    click.echo("\n== Stage 9: Company Context ==")
+    existing_context = context_store.get(company.id)
+    if existing_context and not is_context_stale(existing_context.fetched_at, now=now):
+        click.echo(f"  cache hit (fetched_at={existing_context.fetched_at})")
+        company_context = existing_context
+    else:
+        status, company_context = await run_stage9(
+            company_id=company.id, company_domain=company.domain, company_name=company.name,
+            fetcher=fetcher, budget=budget,
+        )
+        click.echo(f"  status: {status.value}")
+        if company_context:
+            context_store.save(company_context)
+            click.echo(f"  summary: {company_context.summary[:120]}")
+
+    # --- Stage 10: Scoring & Rationale (spec §13) --------------------------
+    click.echo("\n== Stage 10: Scoring & Rationale ==")
+    scored_store = ScoredLeadStore()
+    leads_by_id = {lead.lead_id: lead for lead in leads}
+    jobs_by_id = {job.job_id: job for job in open_jobs}
+    scored_leads: list[ScoredLead] = []
+    if not result.matches:
+        click.echo("  (no matches above the floor — nothing to score)")
+    for m in result.matches:
+        job = jobs_by_id[m.job_id]
+        lead = leads_by_id[m.lead_id]
+        job_version = job.last_seen_at.isoformat()
+        lead_version = (lead.enriched_at or lead.retrieved_at).isoformat()
+        cached_score = scored_store.get_cached(
+            match_id=m.id, prompt_version=PROMPT_VERSION, job_version=job_version, lead_version=lead_version
+        )
+        if cached_score is not None:
+            scored_leads.append(cached_score)
+            click.echo(f"  {m.job_id}/{m.lead_id}: cache hit (spec §13.5)")
+            continue
+
+        outcome = await score_pair(job=job, lead=lead, company=company, match=m, context=company_context)
+        if outcome.status == ScoringStatus.SCORED and outcome.scored_lead is not None:
+            scored = outcome.scored_lead
+        else:
+            scored = fallback_scored_lead(m, job, lead, now=now)
+            click.echo(f"  {m.job_id}/{m.lead_id}: scoring_failed ({outcome.detail}) — rules-score fallback")
+        scored_store.save(scored)
+        scored_leads.append(scored)
+        click.echo(
+            f"  {m.job_id}/{m.lead_id}: relevance={scored.relevance_score:.2f} "
+            f"confidence={scored.confidence_score:.2f} disagrees={scored.disagrees_with_rules}"
+        )
+
+    disagreement_rate = compute_disagreement_rate(scored_leads)
+    if disagreement_rate is not None:
+        click.echo(f"  disagrees_with_rules rate: {disagreement_rate:.1%} (spec §13.4, §19.3)")
+
+    # --- Stage 11: Ranking & Publication (spec §13.6, §14) -----------------
+    click.echo("\n== Stage 11: Ranking & Publication ==")
+    scored_by_match_id = {s.match_id: s for s in scored_leads}
+    entries = [
+        (scored_by_match_id[m.id], jobs_by_id[m.job_id], leads_by_id[m.lead_id])
+        for m in result.matches
+        if m.id in scored_by_match_id
+    ]
+    company_id_by_job_id = {job.job_id: company.id for job in open_jobs}
+    ranked = rank(
+        entries,
+        context_by_company={company.id: company_context},
+        company_id_by_job_id=company_id_by_job_id,
+        now=now,
+    )
+    matches_by_id = {m.id: m for m in result.matches}
+    gtm_leads, publication_events = publish(
+        ranked,
+        matches_by_id=matches_by_id,
+        company_by_id={company.id: company},
+        company_id_by_job_id=company_id_by_job_id,
+        context_by_company={company.id: company_context},
+    )
+    publication_events += publish_unmatched(result.unmatched, now=now)
+
+    gtm_lead_store = GtmLeadStore()
+    gtm_lead_store.append(gtm_leads)
+    event_store = PublicationEventStore()
+    event_store.append(publication_events)
+
+    for gtm_lead in gtm_leads:
+        click.echo(
+            f"  #{gtm_lead.rank} {gtm_lead.job.title} -> {gtm_lead.lead.name} "
+            f"({gtm_lead.lead.contactability})  relevance={gtm_lead.relevance_score:.2f}"
+        )
+        click.echo(f"      {gtm_lead.rationale}")
+
+    if gtm_leads:
+        settings = get_settings()
+        write_csv(settings.gtm_lead_csv_path, gtm_lead_store.latest())
+        click.echo(f"\n  {len(gtm_leads)} lead(s) published; CSV export -> {settings.gtm_lead_csv_path}")
+
 
 def _fmt_rate(rate: float | None) -> str:
     return "n/a (no data)" if rate is None else f"{rate:.1%}"
@@ -445,6 +690,57 @@ async def _canary() -> None:
                 click.echo(f"      {reason}")
     else:
         click.echo("\nNo drift detected.")
+
+
+@cli.command(name="golden-set")
+def golden_set_cmd() -> None:
+    """Spec §22 Phase 5's "golden-set automation": run the matching
+    golden-set accuracy check (spec §19.4) on demand, printing per-case
+    mismatches, not just a pass/fail. The same evaluator backs
+    `tests/test_matching_golden_set.py`, which runs it on every change;
+    this command is the operator-triggered equivalent.
+    """
+    from gtm_agent.leads.golden_set import evaluate, load_cases
+
+    cases = load_cases()
+    report = evaluate(cases, now=datetime.now(UTC))
+    click.echo(f"== Matching golden set (spec §19.4): {report.correct}/{report.total} correct ==")
+    click.echo(f"  accuracy: {report.accuracy:.1%}")
+    if report.mismatches:
+        click.echo("  mismatches:")
+        for m in report.mismatches:
+            click.echo(f"    {m.case_id}: expected={m.expected_label} predicted={m.predicted_label} score={m.score:.3f}")
+    else:
+        click.echo("  no mismatches")
+
+
+@cli.command(name="denylist-add")
+@click.option("--domain", required=True, help="Company domain to exclude from all future scraping (spec §21.6)")
+@click.option("--reason", default=None, help="Why this company is being excluded")
+def denylist_add(domain: str, reason: str | None) -> None:
+    """Add a company to the scraping denylist (spec §21.6). Honoured
+    immediately by every future `discover` invocation for this domain.
+    """
+    entry = CompanyDenylistStore().add(domain, reason=reason)
+    click.echo(f"Added '{entry.domain}' to the company denylist.")
+
+
+@cli.command(name="suppress-lead")
+@click.option("--email", default=None, help="The lead's email — the strongest identity key (spec §21.6)")
+@click.option("--full-name", default=None, help="The lead's full name, if no email is on file")
+@click.option("--company-domain", default=None, help="Required when suppressing by name instead of email")
+@click.option("--reason", default=None)
+def suppress_lead(email: str | None, full_name: str | None, company_domain: str | None, reason: str | None) -> None:
+    """Erase a lead and suppress them from every future Apollo sweep (spec
+    §21.6): "Deletion without suppression is not erasure." Takes identity
+    fields directly rather than a `lead_id`, since a suppression request
+    must outlive any specific Apollo record for the same person.
+    """
+    if not email and not (full_name and company_domain):
+        raise click.UsageError("Provide --email, or both --full-name and --company-domain.")
+    key = suppression_key(email=email, full_name=full_name, company_domain=company_domain)
+    PersonSuppressionStore().add(key, reason=reason)
+    click.echo(f"Suppressed '{key}'. Future Apollo sweeps will never re-add this person.")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ Used by two different stages, at different phases:
       search fallback (spec §4.1 Strategy D). `search()` is implemented in
       Phase 2 for this caller: `discovery.source_resolution.TavilySearchStrategy`.
     - Stage 9, Company Context — funding/hiring/news summary, once per company,
-      cached ~7 days (spec §12). Not implemented until Phase 3.
+      cached ~7 days (spec §12). Implemented in Phase 3 — see
+      `get_company_context` and, for the summarisation into a `CompanyContext`
+      record, `leads.company_context`.
 
 `search()`'s request/response shape follows Tavily's public Search API as
 documented at integration time. Per this codebase's existing convention for
@@ -79,6 +81,36 @@ class TavilyClient:
         results = data.get("results") if isinstance(data, dict) else None
         return results if isinstance(results, list) else []
 
-    async def get_company_context(self, *, company_domain: str, company_name: str) -> dict[str, Any] | None:
-        """Stage 9 — spec §12. Funding, hiring/growth news, leadership changes."""
-        raise NotImplementedError("Tavily company-context integration is Phase 3 work — see spec §12")
+    async def get_company_context(
+        self, *, company_domain: str, company_name: str, fetcher: Fetcher
+    ) -> dict[str, Any]:
+        """Stage 9 — spec §12.2: "recent funding announcements, hiring/growth
+        news, notable product or leadership changes, and the careers page as
+        a cross-check." Three templated, narrow queries rather than one
+        broad one — narrow queries are what spec §12.2 asks for ("kept
+        narrow"), and separating funding from hiring/careers lets
+        `leads.company_context` derive `funding_signal`/`hiring_signal`
+        independently instead of guessing which result answered which
+        question.
+
+        Returns a raw dict of {"funding_results", "hiring_results",
+        "careers_results"} — each Tavily's own result list. Summarising this
+        into a compact `CompanyContext` (spec: "the LLM receives a summary,
+        not raw search results") is `leads.company_context`'s job, not this
+        client's; this method's only responsibility is the three fetches.
+        """
+        # Funding/hiring news is published by third parties (press, Crunchbase,
+        # etc.), not on the company's own site — unlike Stage 1's Strategy D
+        # (spec §4.1), domain-restricting these two would return almost
+        # nothing. Only the careers cross-check genuinely belongs on the
+        # company's own domain.
+        funding_results = await self.search(f'"{company_name}" funding OR raised OR "series" round', fetcher=fetcher)
+        hiring_results = await self.search(f'"{company_name}" hiring growth news leadership', fetcher=fetcher)
+        careers_results = await self.search(
+            f'"{company_name}" careers open positions', fetcher=fetcher, restrict_domain=company_domain
+        )
+        return {
+            "funding_results": funding_results,
+            "hiring_results": hiring_results,
+            "careers_results": careers_results,
+        }

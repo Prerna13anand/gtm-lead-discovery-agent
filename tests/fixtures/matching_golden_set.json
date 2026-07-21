@@ -1,0 +1,146 @@
+[
+  {
+    "case_id": "gs-01-small-eng-founder-cto",
+    "note": "18-person co, engineering role, CTO founder — spec §10.8 worked example row 1",
+    "headcount": 18,
+    "job": {"function": "engineering", "seniority": "senior"},
+    "lead": {"title_raw": "CTO", "function": null, "seniority": "executive", "is_founder": true},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-02-small-eng-founder-ceo",
+    "note": "18-person co, engineering role, CEO founder (function-agnostic) — spec §10.8 worked example row 2",
+    "headcount": 18,
+    "job": {"function": "engineering", "seniority": "senior"},
+    "lead": {"title_raw": "CEO", "function": null, "seniority": "executive", "is_founder": true},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-03-small-eng-staff-engineer",
+    "note": "18-person co, staff engineer one level above the role",
+    "headcount": 18,
+    "job": {"function": "engineering", "seniority": "senior"},
+    "lead": {"title_raw": "Staff Engineer", "function": "engineering", "seniority": "staff", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-04-small-eng-head-of-ops",
+    "note": "18-person co, Head of Ops has no engineering ownership — spec §10.8 worked example row 4",
+    "headcount": 18,
+    "job": {"function": "engineering", "seniority": "senior"},
+    "lead": {"title_raw": "Head of Ops", "function": "operations", "seniority": "director", "is_founder": false},
+    "expected_label": "wrong"
+  },
+  {
+    "case_id": "gs-05-small-sales-vp-sales",
+    "note": "18-person co, VP Sales owns the open sales role directly",
+    "headcount": 18,
+    "job": {"function": "sales", "seniority": "mid"},
+    "lead": {"title_raw": "VP Sales", "function": "sales", "seniority": "vp", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-06-small-sales-ceo-founder",
+    "note": "Small co, founder covers a sales role too (spec §9.2)",
+    "headcount": 12,
+    "job": {"function": "sales", "seniority": "mid"},
+    "lead": {"title_raw": "Founder", "function": null, "seniority": "executive", "is_founder": true},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-07-mid-eng-founder-cto",
+    "note": "100-person co: founder still plausible but no longer clearly dominant (spec §10.4 mid tier)",
+    "headcount": 100,
+    "job": {"function": "engineering", "seniority": "senior"},
+    "lead": {"title_raw": "CTO", "function": null, "seniority": "executive", "is_founder": true},
+    "expected_label": "plausible"
+  },
+  {
+    "case_id": "gs-08-large-eng-founder-cto",
+    "note": "300-person co: founder is now the wrong contact for an IC role (spec §10.4 largest tier)",
+    "headcount": 300,
+    "job": {"function": "engineering", "seniority": "senior"},
+    "lead": {"title_raw": "CTO", "function": null, "seniority": "executive", "is_founder": true},
+    "expected_label": "wrong"
+  },
+  {
+    "case_id": "gs-09-large-eng-manager",
+    "note": "300-person co: an actual Engineering Manager one level up is the correct owner",
+    "headcount": 300,
+    "job": {"function": "engineering", "seniority": "mid"},
+    "lead": {"title_raw": "Engineering Manager", "function": "engineering", "seniority": "manager", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-10-medium-design-head-of-design",
+    "note": "40-person co: Head of Design directly owns an open design role",
+    "headcount": 40,
+    "job": {"function": "design", "seniority": "mid"},
+    "lead": {"title_raw": "Head of Design", "function": "design", "seniority": "manager", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-11-medium-design-unrelated-sales-rep",
+    "note": "40-person co: a junior sales rep has no plausible ownership of a design role",
+    "headcount": 40,
+    "job": {"function": "design", "seniority": "mid"},
+    "lead": {"title_raw": "Sales Development Representative", "function": "sales", "seniority": "entry", "is_founder": false},
+    "expected_label": "wrong"
+  },
+  {
+    "case_id": "gs-12-tiny-product-founder",
+    "note": "10-person co: founder owns the only open product role",
+    "headcount": 10,
+    "job": {"function": "product", "seniority": "mid"},
+    "lead": {"title_raw": "Co-Founder", "function": null, "seniority": "executive", "is_founder": true},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-13-tiny-product-recruiter",
+    "note": "10-person co: an in-house recruiter is a legitimate but secondary contact (spec §10.3 Signal 4)",
+    "headcount": 10,
+    "job": {"function": "product", "seniority": "mid"},
+    "lead": {"title_raw": "Technical Recruiter", "function": "people", "seniority": "entry", "is_founder": false, "is_recruiter": true},
+    "expected_label": "plausible"
+  },
+  {
+    "case_id": "gs-14-large-marketing-cmo",
+    "note": "149-person co (just under the largest tier): CMO owns an open marketing role",
+    "headcount": 149,
+    "job": {"function": "marketing", "seniority": "senior"},
+    "lead": {"title_raw": "CMO", "function": "marketing", "seniority": "executive", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-15-small-cs-head-of-support",
+    "note": "25-person co: Head of Support owns an open customer-success role",
+    "headcount": 25,
+    "job": {"function": "customer_success", "seniority": "mid"},
+    "lead": {"title_raw": "Head of Support", "function": "customer_success", "seniority": "manager", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-16-tiny-finance-cfo-founder",
+    "note": "8-person co: founding CFO owns the only open finance role",
+    "headcount": 8,
+    "job": {"function": "finance", "seniority": "senior"},
+    "lead": {"title_raw": "CFO", "function": "finance", "seniority": "executive", "is_founder": true},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-17-medium-legal-general-counsel",
+    "note": "60-person co: General Counsel owns the only open legal role",
+    "headcount": 60,
+    "job": {"function": "legal", "seniority": "mid"},
+    "lead": {"title_raw": "General Counsel", "function": "legal", "seniority": "director", "is_founder": false},
+    "expected_label": "correct_owner"
+  },
+  {
+    "case_id": "gs-18-small-data-adjacent-engineering-lead",
+    "note": "18-person co: an engineering lead is an adjacent-function, plausible-but-not-ideal contact for a data role",
+    "headcount": 18,
+    "job": {"function": "data", "seniority": "mid"},
+    "lead": {"title_raw": "Engineering Lead", "function": "engineering", "seniority": "lead", "is_founder": false},
+    "expected_label": "plausible"
+  }
+]

@@ -3,51 +3,85 @@
 Implementation of the pipeline described in [`JOB_SCRAPING_AGENT.md`](JOB_SCRAPING_AGENT.md). That document is the
 engineering specification; this README describes only what is actually built so far.
 
-## Status: Phase 1 complete (per spec §22's own Phase 1 scope)
+## Status: Phases 1-5 complete (per spec §22's own rollout scope)
 
-Phase 1 built the project foundation and **Part I — Job Discovery** (spec §4–§7, §15.1, §19.1):
+All five phases of spec §22's Phased Rollout are implemented: **Part I — Job Discovery** (stages 1-5),
+**Part II — Lead Discovery & Matching** (stages 6-9), **Part III — Scoring & Output** (stages 10-11), and the
+Phase 5 hardening/tuning surface (persona-gap detection, suppression/denylist tooling, golden-set automation,
+feedback-agreement and budget-usage tuning inputs). 543 tests pass (`pytest -q`).
 
-- Project structure, configuration, logging
-- Stage 1 — Source Resolution (spec §4): homepage-link and path-probe strategies, manual override
-- Stage 2 — ATS Fingerprinting (spec §5): detection signal architecture and platform registry
-- Stage 3 — Extraction (spec §6): the `BoardAdapter` interface and adapter registry. **Greenhouse, Lever, and
-  Ashby adapters are real** (Phases 2A/2B/2C), against each platform's public job-board API; the generic-HTML
-  fallback is still a placeholder.
-- Stage 4 — Normalisation (spec §7): title canonicalisation, location parsing, rules-based function/seniority
-  classification, `posted_at` inference — platform-aware, dispatching on `RawPosting.source_platform` to read
-  each ATS's native field names, per spec §7's own goal statement and the explicit "ATS-native field" language
-  in §7.5 and §7.7. JSON-LD's behaviour is unchanged — it's one dispatch branch among four.
-- **`scrape_run` ledger** (spec §15.1): one JSONL-persisted row per company per execution attempt, recording
-  status, timestamps, adapter used, job count, request/byte counts, and a raw-payload archive reference.
-  Recorded for *every* attempt, including Stage 1 failures — a company that couldn't be scraped stays visible
-  rather than silently disappearing (spec §2.3). See `core/run_ledger.py`.
-- **Basic coverage metrics** (spec §19.1): scrape success rate, source resolution rate, ATS coverage, degraded
-  extraction rate, and unscraped count — all computed directly from the `scrape_run` ledger. See
-  `core/metrics.py` and `python main.py metrics` below.
-- Placeholder service modules for Azure OpenAI (config/init only), Apollo, PDL, and Tavily — no integration logic
+**What this is not:** a real sweep orchestrator, scheduler, or production database. `main.py` is a
+single-company CLI demo harness that exercises the full 11-stage pipeline end to end; every persisted "table"
+in spec §15 is a local JSONL file, not a real database. Both are explicit, documented scope boundaries — see
+**Known limitations** below.
 
-This closes out every item spec §22 names under "Phase 1 — Prove the ATS thesis." The exit criterion itself
-(>60% of the target list scraped, >95% golden-set accuracy) isn't something this codebase can satisfy on its
-own — it needs a real target company list and a hand-labelled golden set, both explicit inputs per §1.6/§19.4,
-not something this agent generates.
+### Part I — Job Discovery (spec §4-§8, §15.1, §19.1, §20.3)
 
-**Not yet built:** lead discovery, matching, enrichment, company context, scoring, ranking, publication,
-change detection/identity (spec §8), a real fetch-layer politeness stack (robots.txt, conditional requests,
-per-domain rate limiting), and real generic-HTML extraction — all spec §22 Phase 2+ work. See inline `TODO`
-markers and module docstrings for what's deferred and to which phase, and **Known limitations / follow-ups**
-below for what's still intentionally out of scope within what's built.
+- Stage 1 — Source Resolution: homepage-link, path-probe, sitemap, and Tavily-search-fallback strategies, plus
+  manual override
+- Stage 2 — ATS Fingerprinting: detection-signal architecture and platform registry
+- Stage 3 — Extraction: the `BoardAdapter` interface with real, live-verified adapters for **Greenhouse, Lever,
+  Ashby, Workable, SmartRecruiters, Recruitee, and Rippling**, plus a JSON-LD adapter, a heuristic generic-HTML
+  fallback, and a Playwright-based rendered-DOM adapter with endpoint-learning
+- Stage 4 — Normalisation: title canonicalisation, location parsing, rules-based function/seniority
+  classification (now exposed publicly — `classify_function`/`classify_seniority` — and reused by Stage 6),
+  `posted_at` inference
+- Stage 5 — Change Detection & Identity: the OPEN/MISSING/CLOSED lifecycle, the grace window, `zero_jobs_suspicious`
+  handling, and the full event stream (`job_opened`, `job_closed`, `job_reopened`, `job_updated`, `board_emptied`,
+  `board_first_seen`)
+- `scrape_run` ledger, coverage metrics (§19.1), and a nightly canary suite (§20.3) against real live boards
+
+### Part II — Lead Discovery & Matching (spec §9-§12, §15.2, §18, §19.3-§19.5)
+
+- Stage 6 — Lead Discovery: Apollo People Search integration, the Appendix C persona ladder, per-company
+  caching with the §9.6 invalidation triggers, the §9.4 retrieval-cap `company_identity_suspect` check, and
+  the full §9.7/§17.2 failure taxonomy
+- Stage 7 — Matching: all six §10.3 signals (function alignment, seniority relationship, ownership language,
+  recruiter role, location, tenure), the §10.4 headcount modulation (the segment-specific founders-own-everything
+  correction), match-floor/top-K selection, and typed `unmatched_job` reasons
+- Stage 8 — Enrichment: PDL integration, the §11.2 field-level trust waterfall, §11.3 identity-corroboration
+  (rejecting weak name-only matches), and 90-day caching
+- Stage 9 — Company Context: Tavily-backed funding/hiring/careers-cross-check queries, summarised and cached
+  ~7 days, non-blocking on failure
+- Credit budgeting (§18.3) shared across Stages 6/8/9; feedback capture (§19.5); a hand-constructed 18-pair
+  matching golden set (§19.4) — see **Known limitations**
+
+### Part III — Scoring & Output (spec §13-§14, §15.2)
+
+- Stage 10 — Scoring & Rationale: real Azure OpenAI structured-output integration (`openai`'s
+  `beta.chat.completions.parse`), the §13.1 judge/explain/adjust boundary, `cited_signals` grounding validation,
+  retry-once-on-violation, and a rules-score fallback on `scoring_failed` (never drops a pair)
+- Stage 11 — Ranking & Publication: the §13.6 priority formula (relevance × confidence × recency × contactability
+  × company-context weight), the `GtmLead` output contract, the `lead_ready`/`job_unmatched`/`lead_superseded`/
+  `job_closed` event stream, and CSV export (spec §14.4)
+- `disagrees_with_rules` monitoring (§13.4/§19.3)
+
+### Phase 5 — Harden and tune (spec §22)
+
+- Persona-gap detection (`leads/persona_gap.py`): turns a recurring `no_plausible_owner` pattern for one
+  function into a ticket-worthy finding (§17.2, §19.6)
+- `ats_unknown` frequency metric (`core/metrics.py`): prioritises which new ATS adapter to build next
+- Company denylist and person suppression (§21.6): `main.py denylist-add` / `suppress-lead`, wired into Stage 1
+  (checked before any resolution attempt) and Stage 6 (filtered out of every future Apollo sweep)
+- Golden-set automation: `main.py golden-set` runs the same evaluator the test suite runs on every change
+- Feedback-agreement (`leads/tuning.py`) and per-meter budget-usage summaries — starting inputs for a real
+  matching-weight-tuning and cost-tuning process, not the process itself (see **Known limitations**)
 
 ## Project layout
 
 ```
 src/gtm_agent/
 ├── config/       # environment-backed settings
-├── core/         # logging, async HTTP fetch layer, scrape_run ledger, coverage metrics
-├── models/       # canonical Pydantic domain models (CareersSource, JobPosting, ScrapeRun, ...)
-├── discovery/    # Stages 1-4: source resolution, ATS fingerprinting, extraction, normalisation
-│   └── extraction/   # BoardAdapter interface + per-platform adapters
-└── services/     # placeholder clients: azure_openai, apollo, pdl, tavily
-main.py           # CLI entry point (discover, metrics)
+├── core/         # logging, fetch layer, metrics, and every JSONL-backed "table" (run ledger,
+│                 #   lifecycle, lead/matching/scoring stores, compliance)
+├── models/       # canonical Pydantic domain models — one module per spec §15 table family
+├── discovery/    # Part I, stages 1-5
+│   └── extraction/   # BoardAdapter interface + one adapter per platform
+├── leads/        # Part II, stages 6-9 + budget, compliance, persona-gap, tuning, golden-set
+├── scoring/      # Part III, stages 10-11 (rationale, ranking, publication)
+└── services/     # external API clients: apollo, pdl, tavily, azure_openai
+main.py           # CLI entry point — discover (all 11 stages), metrics, canary, golden-set,
+                  #   denylist-add, suppress-lead
 ```
 
 ## Setup
@@ -65,92 +99,98 @@ cp .env.example .env           # fill in credentials as they become available
 python main.py discover --domain example.com --name "Example Inc"
 ```
 
-This runs Stages 1–4 for a single company and prints the resulting job postings (or the typed failure state
-if resolution/extraction doesn't succeed). Real Greenhouse-, Lever-, and Ashby-hosted companies now all
-return real postings with title, location, workplace type, department, employment type (where the platform
-exposes one), and a real (non-inferred) `posted_at` populated correctly per platform. Every invocation also
-records one row in the `scrape_run` ledger (`.data/scrape_runs.jsonl` by default) and prints a summary of it,
-regardless of where the run terminated.
+Runs the full pipeline for one company: Stages 1-5 (job discovery), then — if any jobs are currently open —
+Stages 6-11 (lead discovery through publication). Prints a per-stage summary and writes a CSV export
+(`.data/gtm_leads.csv` by default) once at least one lead publishes.
 
 ```bash
-python main.py metrics
-```
-
-Prints the spec §19.1 coverage metrics (scrape success rate, source resolution rate, ATS coverage, degraded
-extraction rate, unscraped count), computed from every run recorded in the ledger so far. Sample output after
-a handful of `discover` runs across all three real ATS platforms plus one genuine failure:
-
-```
-== Coverage metrics (spec §19.1) ==
-  scrape success rate:      83.3%  (5/6 runs)
-  source resolution rate:   75.0%  (3/4 companies)
-  ATS coverage:             100.0%  (3/3 resolved companies)
-  degraded extraction rate: 0.0%  (0/5 successful runs)
-  unscraped count:          1  (absolute, never a percentage — spec §19.1)
+python main.py metrics       # spec §19.1 coverage metrics from the scrape_run ledger
+python main.py canary        # spec §20.3 nightly canary suite against real ATS boards
+python main.py golden-set    # spec §19.4 matching-accuracy check against the hand-built golden set
+python main.py denylist-add --domain acme.com --reason "..."   # spec §21.6
+python main.py suppress-lead --email jane@acme.com --reason "GDPR erasure request"   # spec §21.6
 ```
 
 ## Known limitations / follow-ups
 
-**`normalize()`'s per-platform field mapping covers the required fields only — some enhancements were
-deliberately left out.** The Stage 4 fix (dispatching on `RawPosting.source_platform` for title, description,
-location, department, employment type, and `posted_at`) was scoped strictly to what spec §7 requires. Left
-out on purpose, not forgotten:
+**Live verification was only possible for Azure OpenAI.** `AZURE_OPENAI_API_KEY`/`ENDPOINT`/`DEPLOYMENT` are
+configured in this environment; `APOLLO_API_KEY`, `PDL_API_KEY`, and `TAVILY_API_KEY` are not. Concretely:
 
-- **Lever's description is `categories`-adjacent `description` only** — not assembled with Lever's separate
-  `opening`, `lists`, and `additional` fields. Spec §7.6 calls the requirements list "the highest-signal part
-  of a posting," and Lever's `lists` field (e.g. a "You will:" heading + bullets) is exactly that, kept
-  separate from `description` in Lever's own shape. The current fix already yields a non-empty, usable
-  description from `description` alone; assembling the other sections into one richer blob is a real quality
-  improvement but wasn't required to close the gap, so it's left for a future pass.
-- **Greenhouse's `offices[]` array** isn't consulted as a secondary/cross-check location source alongside
-  `location.name`.
-- **Compensation extraction** stays JSON-LD-only. No structured compensation field was found on any of the
-  three real ATS payloads examined during this build — that's an absence of data on those boards, not a gap
-  in the normalizer (spec §7.5: never infer compensation from free text).
-- **Full boilerplate stripping / non-English handling (§7.6)** and **markdown structure preservation**
-  (`description_markdown` still equals `description_text`) remain pre-existing simplifications, unrelated to
-  platform field-mapping specifically.
-- **LLM residue classification (§7.3)** for titles the rules-based classifier can't resolve is still
-  unimplemented, pending `services.azure_openai` having real scoring logic.
+- Stage 10 (LLM scoring) was exercised against the real Azure OpenAI deployment (`gpt-5.4-mini`) with real
+  job/lead pairs and produced well-grounded, correctly-hedged rationales — including consistently down-weighting
+  the rules' founder-driven scores when the job function clearly didn't fit, and setting `disagrees_with_rules`
+  accordingly. This is real evidence the §13.1 judge/explain/adjust design works as intended, not just that it
+  passes mocked tests.
+- Stages 6 (Apollo), 8 (PDL), and 9 (Tavily company-context) could **not** be live-verified — there is no way
+  to test an integration against a real vendor API without credentials. Their failure paths (not-configured,
+  HTTP error, budget exhaustion) *were* exercised live end-to-end against a real company (`linear.app`'s real,
+  live Ashby board, 24 real postings) and behaved correctly: jobs still published as `unmatched` with the
+  correct typed reason, Stage 9 degraded non-blockingly. A synthetic seeded lead was also used to exercise
+  Stages 7-11 against those same 24 real jobs end to end, including the real Stage 10 LLM call, confirmed above.
+- Every third-party endpoint shape (`apollo.py`, `pdl.py`, `services/tavily.py`'s `get_company_context`) is
+  therefore this codebase's best-effort mapping onto each vendor's public docs, explicitly flagged in each
+  module's own docstring as unverified against the live API — per this project's own established convention
+  for Part I's ATS adapters (Appendix A's build note), carried into Part II/III.
 
-**Board-token resolution duplicates a Stage 2 fetch in one case.** The `BoardAdapter` interface (spec §6.1)
-receives only `CareersSource`, not `AtsIdentification` — so `GreenhouseAdapter`, `LeverAdapter`, and
-`AshbyAdapter` all resolve their own board token from `source.careers_url` rather than reusing the token
-Stage 2 (`ats_detection.identify_ats`) already found. When the token is already in the URL (the common case —
-Stage 1's homepage-link strategy often resolves straight to an ATS link) this costs nothing extra. When Stage
-2 found the platform via a redirect (the company's own domain 30x-redirects to the ATS), the adapter
-re-fetches the source URL once to re-derive the same redirect target Stage 2 already followed. Acceptable for
-now since there's no persistent `careers_source.ats_board_token` store yet (spec §15.1 models the token as
-living on the same row as the careers source); worth revisiting once a real orchestrator persists Stage 2
-output back onto the source record instead of recomputing it.
+**The matching golden set (`tests/fixtures/matching_golden_set.json`) is a starting corpus, not real ground
+truth.** Spec §19.4 asks for "~50 pairs... hand-labelled by someone with GTM judgement." No GTM person's
+judgement is available to a coding agent, so this codebase built an 18-pair set from its own domain reasoning
+(the §10.8 worked example, the §9.2 founders-own-everything insight, straightforward function/seniority
+mismatches), over-sampling sub-20-headcount companies per the spec's own guidance. It measures 88.9% accuracy
+against this codebase's own bucketing of continuous scores into correct/plausible/wrong labels — useful as a
+regression lock (spec: "measured... on every rules change"), not as validation against independent truth.
 
-**Coverage metrics (`core/metrics.py`) read two spec §19.1 definitions literally rather than with inferred
-nuance.** Both choices are documented in the module's own docstring, but worth surfacing here too:
+**Matching weights (`leads/matching.py`), ranking weights (`scoring/ranking.py`), and the match floor/top-K
+constants are explicitly-labelled starting points**, per the spec's own repeated acknowledgement that these
+values need real feedback data to tune (§10.3, §13.6, open questions §23.10-§23.12). Nothing here claims to be
+a tuned production weight.
 
-- **"Unscraped count"** is defined as "Companies in a **non-success** terminal state" — implemented as
-  literally `status != SUCCESS`. A more elaborate reading could exclude `parse_degraded`/`partial`, since
-  spec §17's *downstream* column calls those "published" rather than truly unscraped — but that distinction
-  belongs to a different column of a different table, and isn't what this metric's own definition says.
-- **"Degraded extraction rate"'s** denominator, "successful", is read as `status == SUCCESS` specifically —
-  not "success-or-degraded". `parse_degraded` is its own distinct terminal `ScrapeRunStatus`, never a variant
-  of `success`, in this ledger.
+**No sweep orchestrator, scheduler, or cadence tiering exists** (spec §16). `main.py discover` processes one
+company per invocation; there is no multi-company concurrency, no §16.2 tiered cadence, and no real alerting/
+paging behind any "alert"/"page" language in §17-§19 (this mirrors Part I's own pre-existing scope boundary,
+carried through unchanged).
 
-Neither choice changes any current output: `parse_degraded` isn't reachable yet (the generic-HTML adapter
-that would produce it is a Phase 2 placeholder), so that numerator is always 0 today regardless.
+**No real database.** Every spec §15 table is a local, append-only JSONL file — the same stand-in convention
+established in Phase 1/2 for `scrape_run`, extended consistently through every later phase's own tables
+(`lead`, `lead_job_match`, `scored_lead`, `company_context`, `company_denylist`, etc.). Each store class is a
+thin, swappable wrapper — replacing the backing storage later doesn't require touching any call site.
 
-Also: **"Source resolution rate" and "ATS coverage" are computed over each company's most recent run**, not
-every historical attempt — a company retried after an earlier failure is counted by its current state, not
-its past churn. "Scrape success rate" and "Degraded extraction rate", by contrast, are computed over *every*
-closed run, matching the spec's own "runs" (not "companies") wording for those two.
+**The §21.5 compliance review gate has not run.** Spec §21.5: "the review should be a gate on Phase 3... not a
+parallel workstream." This codebase implements Stage 6-8's lead-data handling (enrich-late, cache-narrowly,
+suppression list) in a way *designed* to satisfy that review, but the review itself is a human/legal process
+this codebase cannot perform. **Do not process real personal data at volume with this code before that review
+completes and signs off**, per the spec's own explicit instruction.
+
+**Job-version/lead-version cache keys are approximations.** Spec §13.5's `scored_lead` cache key needs a
+`job_version`/`lead_version`; a real `job_posting_version` counter exists (Stage 5, §8.5), but no equivalent
+`lead_version` counter exists anywhere in the spec's own Part II design. This codebase uses each record's own
+natural last-changed timestamp (`job.last_seen_at`, `lead.enriched_at` or `retrieved_at`) as a stand-in — see
+`scoring/rationale.py`'s module docstring for the full reasoning.
+
+**Erasure is suppression-filtered, not physically deleted.** Spec §21.6: "a lead who requests erasure is
+deleted and added to a suppression list." This codebase's `leads.compliance.erase_lead` adds the suppression
+entry and filters the person out of every future read (Stage 6 sweep results, cached-lead reads) — which is
+the compliance-relevant guarantee ("never silently re-add them") — but does not rewrite the underlying JSONL
+row, consistent with every other store here being append-only. A real database migration would additionally
+hard-delete or anonymise the row itself.
+
+Earlier phases' own previously-documented limitations (Lever's multi-field description assembly, Greenhouse's
+`offices[]` cross-check, full boilerplate stripping, LLM residue classification for titles the rules-classifier
+can't resolve, the Stage 2/3 board-token double-fetch) remain as originally scoped and are unaffected by
+Phases 3-5's additions.
 
 ## Design reference
 
 All architectural decisions here trace back to `JOB_SCRAPING_AGENT.md`. Notably:
 
 - §2.1 — ATS-API-first, HTML second
-- §2.2 — one adapter interface, many backends
 - §2.3 — "scrape failed" is never "no open jobs"
-- §2.6 — provenance on every field
-- §3.2 — stage contracts
+- §2.7 — discover leads per company, match to jobs locally (the reason Stage 6 is a per-company sweep, not a
+  per-job search)
+- §2.8 — cheap signals before expensive ones (rules-based matching before PDL enrichment before LLM scoring)
+- §2.9 — say "we don't know" rather than guess (empty lead sets carry an explicit reason; low evidence produces
+  a low score, never a confident-sounding guess)
+- §10.4 — headcount modulation, the single most consequential correction in Part II
+- §13.1 — the LLM judges and explains an already-computed match; it never matches from scratch
 
 Read the spec before extending any stage — the "why" behind each module lives there, not in code comments.

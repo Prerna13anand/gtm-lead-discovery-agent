@@ -31,7 +31,7 @@ rather than hidden:
     - Function/seniority classification (§7.3) is rules-only. Spec §7.3 also
       wants an LLM fallback for titles the rules can't resolve; that depends
       on `services.azure_openai`, which is a config-only stub in Phase 1 —
-      see the TODO in `_classify_function`.
+      see the TODO in `classify_function`.
     - Location parsing (§7.4) and description cleaning (§7.6) implement the
       common cases (multi-location strings, remote/hybrid qualifiers,
       structured places, basic HTML-to-text) but not the full
@@ -190,9 +190,14 @@ _SENIORITY_KEYWORDS: tuple[tuple[Seniority, tuple[str, ...]], ...] = (
 )
 
 
-def _classify_function(title_canonical: str, department_raw: str | None) -> tuple[JobFunction | None, Provenance]:
+def classify_function(title_canonical: str, department_raw: str | None) -> tuple[JobFunction | None, Provenance]:
     """Rules first, per spec §7.3. Only titles the rules fail to classify would
     go to an LLM in a later phase — see the TODO below.
+
+    Public (not `_`-prefixed) because Stage 6 (spec §9.5, `leads.discovery`)
+    reuses this exact classifier for `Lead.function`, deliberately — see
+    that module's docstring and spec §9.5: "Reusing one classifier for both
+    sides is the single change that most simplifies §10."
     """
     haystack = f"{title_canonical} {department_raw or ''}".lower()
     for function, keywords in _FUNCTION_KEYWORDS.items():
@@ -211,7 +216,10 @@ def _classify_function(title_canonical: str, department_raw: str | None) -> tupl
     )
 
 
-def _classify_seniority(title_canonical: str) -> tuple[Seniority | None, Provenance]:
+def classify_seniority(title_canonical: str) -> tuple[Seniority | None, Provenance]:
+    """Public for the same reason as `classify_function` — reused by Stage 6
+    for `Lead.seniority` (spec §9.5).
+    """
     haystack = title_canonical.lower()
     for seniority, keywords in _SENIORITY_KEYWORDS:
         if any(keyword in haystack for keyword in keywords):
@@ -736,7 +744,7 @@ def _degraded_posting(raw: RawPosting) -> JobPosting:
 # adds a description; it doesn't make the heuristic title/location/URL
 # extraction any more trustworthy). Matches `_degraded_posting`'s low-
 # confidence convention below and the 0.3 "no rules match" confidence
-# `_classify_function`/`_classify_seniority` already use elsewhere in this
+# `classify_function`/`classify_seniority` already use elsewhere in this
 # file as this codebase's established "low but not zero" value — zero would
 # be wrong here since, unlike the unstructured-string case `_degraded_posting`
 # handles, real structured fields (title, sometimes location) were extracted.
@@ -768,8 +776,8 @@ def normalize(raw: RawPosting) -> JobPosting:
 
     department_raw = _extract_department(platform, payload)
 
-    function, function_provenance = _classify_function(title_canonical, department_raw)
-    seniority, seniority_provenance = _classify_seniority(title_canonical)
+    function, function_provenance = classify_function(title_canonical, department_raw)
+    seniority, seniority_provenance = classify_seniority(title_canonical)
 
     description_html = _extract_description_html(platform, payload)
     description_text, description_markdown = _clean_description(description_html)
