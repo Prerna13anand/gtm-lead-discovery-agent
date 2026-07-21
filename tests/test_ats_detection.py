@@ -12,6 +12,7 @@ from gtm_agent.discovery.ats_detection import (
     has_jsonld_job_posting,
     has_spa_root_or_ats_embed,
     identify_ats,
+    identify_from_captured_requests,
     route_extraction,
 )
 from gtm_agent.discovery.ats_platforms import known_ats_platform_for_host
@@ -201,10 +202,13 @@ async def test_identify_ats_fetch_does_not_leave_a_stored_validator_for_later_re
         # its Signal-2 fetch instead of taking the decisive host-match shortcut.
         return httpx.Response(200, text="<html><body>plain company site</body></html>", headers={"ETag": '"v1"'})
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    async def no_aliases(hostname: str) -> list[str]:
+        return []
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         source = _source("https://acme.com/careers")
-        await identify_ats(source, fetcher)
+        await identify_ats(source, fetcher, dns_resolver=no_aliases)
 
         # A later "real" read of the same URL (e.g. Stage 3's own fetch)
         # must see the full body, not a 304 caused by identify_ats's read.
@@ -214,3 +218,89 @@ async def test_identify_ats_fetch_does_not_leave_a_stored_validator_for_later_re
 
     assert result.status_code == 200
     assert "plain company site" in result.text
+
+
+# --- Signal 6 — DNS/CNAME (spec §5.1) --------------------------------------
+
+
+async def test_identify_ats_signal_6_dns_cname_match():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>plain company site, no static markers</body></html>")
+
+    async def resolver(hostname: str) -> list[str]:
+        assert hostname == "careers.acme.com"
+        return ["boards.greenhouse.io"]
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        source = _source("https://careers.acme.com/jobs")
+        result = await identify_ats(source, fetcher, dns_resolver=resolver)
+    finally:
+        await fetcher.aclose()
+
+    assert result.value is not None
+    assert result.value.platform == AtsPlatform.GREENHOUSE
+    assert result.value.detection_signal == DetectionSignal.DNS_CNAME
+    assert result.value.confidence == 0.60
+
+
+async def test_identify_ats_signal_6_no_matching_alias_falls_through_to_ats_unknown():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>plain company site</body></html>")
+
+    async def resolver(hostname: str) -> list[str]:
+        return ["some-other-cdn.example.net"]
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        source = _source("https://careers.acme.com/jobs")
+        result = await identify_ats(source, fetcher, dns_resolver=resolver)
+    finally:
+        await fetcher.aclose()
+
+    assert result.value is None
+    assert result.status.value == "ats_unknown"
+
+
+async def test_identify_ats_signal_6_resolver_error_is_treated_as_no_aliases():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>plain company site</body></html>")
+
+    async def failing_resolver(hostname: str) -> list[str]:
+        raise OSError("simulated resolver failure")
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        source = _source("https://careers.acme.com/jobs")
+        with pytest.raises(OSError):
+            # identify_ats itself doesn't swallow a resolver's own exception —
+            # only `_resolve_cname_aliases`'s *default* implementation catches
+            # OSError/gaierror internally. A custom resolver that raises is
+            # the caller's own contract to honour, same as `fetch_robots_txt`
+            # in `core.robots.RobotsCache`.
+            await identify_ats(source, fetcher, dns_resolver=failing_resolver)
+    finally:
+        await fetcher.aclose()
+
+
+# --- Signal 5 — network-request matching logic (spec §5.1) -----------------
+
+
+def test_identify_from_captured_requests_matches_known_ats_host():
+    identification = identify_from_captured_requests(
+        "acme", ["https://boards.greenhouse.io/v1/boards/acme/jobs", "https://analytics.example.com/track"]
+    )
+    assert identification is not None
+    assert identification.platform == AtsPlatform.GREENHOUSE
+    assert identification.detection_signal == DetectionSignal.NETWORK_REQUESTS
+
+
+def test_identify_from_captured_requests_no_match_returns_none():
+    identification = identify_from_captured_requests(
+        "acme", ["https://analytics.example.com/track", "https://cdn.example.com/app.js"]
+    )
+    assert identification is None
+
+
+def test_identify_from_captured_requests_empty_list_returns_none():
+    assert identify_from_captured_requests("acme", []) is None

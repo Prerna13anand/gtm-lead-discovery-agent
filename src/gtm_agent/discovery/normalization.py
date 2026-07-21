@@ -28,10 +28,13 @@ rather than hidden:
       `JobPosting` rather than guessed at. Generic-HTML's actual output is a
       dict, handled by the normal path below with `is_degraded=True` forced
       for that platform — see the comment on `_GENERIC_HTML_EXTRACTION_CONFIDENCE`.
-    - Function/seniority classification (§7.3) is rules-only. Spec §7.3 also
-      wants an LLM fallback for titles the rules can't resolve; that depends
-      on `services.azure_openai`, which is a config-only stub in Phase 1 —
-      see the TODO in `classify_function`.
+    - Function/seniority classification (§7.3) is rules-first here, exactly
+      as this module always intended: `normalize()`/`normalize_batch()`
+      themselves stay synchronous and network-free, unchanged since Phase 1.
+      The LLM residue fallback for titles the rules can't resolve — spec
+      §7.3's second half — is `discovery.llm_residue.resolve_unclassified`,
+      an optional async second pass a caller runs over this function's
+      output; see that module's docstring for why it isn't folded in here.
     - Location parsing (§7.4) and description cleaning (§7.6) implement the
       common cases (multi-location strings, remote/hybrid qualifiers,
       structured places, basic HTML-to-text) but not the full
@@ -191,8 +194,10 @@ _SENIORITY_KEYWORDS: tuple[tuple[Seniority, tuple[str, ...]], ...] = (
 
 
 def classify_function(title_canonical: str, department_raw: str | None) -> tuple[JobFunction | None, Provenance]:
-    """Rules first, per spec §7.3. Only titles the rules fail to classify would
-    go to an LLM in a later phase — see the TODO below.
+    """Rules first, per spec §7.3. A `None` result here is not final — a
+    caller can run `discovery.llm_residue.resolve_unclassified` afterward to
+    fall back to an LLM for exactly this residue, cached by canonical title.
+    This function itself stays deterministic, network-free, and unchanged.
 
     Public (not `_`-prefixed) because Stage 6 (spec §9.5, `leads.discovery`)
     reuses this exact classifier for `Lead.function`, deliberately — see
@@ -205,14 +210,11 @@ def classify_function(title_canonical: str, department_raw: str | None) -> tuple
             return function, Provenance(
                 source="rules_classifier", confidence=0.85, derived_at=datetime.now(UTC)
             )
-    # TODO(phase 2+): fall back to an LLM call for titles the rules can't
-    # classify, cached by canonical title (spec §7.3). `services.azure_openai`
-    # has no scoring logic yet, so unclassified titles stay `None` in Phase 1.
     return None, Provenance(
         source="rules_classifier_no_match",
         confidence=0.3,
         derived_at=datetime.now(UTC),
-        notes="no keyword matched; LLM residue path not implemented in Phase 1",
+        notes="no keyword matched; see discovery.llm_residue for the optional LLM fallback pass",
     )
 
 
@@ -230,7 +232,7 @@ def classify_seniority(title_canonical: str) -> tuple[Seniority | None, Provenan
         source="rules_classifier_no_match",
         confidence=0.3,
         derived_at=datetime.now(UTC),
-        notes="no keyword matched; LLM residue path not implemented in Phase 1",
+        notes="no keyword matched; see discovery.llm_residue for the optional LLM fallback pass",
     )
 
 

@@ -235,6 +235,16 @@ class RenderedDomAdapter:
         self._learned_endpoints: dict[str, str] = {}
 
     async def discover(self, source: CareersSource, fetcher: Fetcher) -> StageResult[list[RawPosting], ExtractionStatus]:
+        # Spec §21.1: the Playwright renderer navigates the page directly,
+        # outside `Fetcher`'s own request path — checked explicitly here so
+        # a disallowed careers URL is never rendered, matching every other
+        # adapter's guarantee (see `Fetcher.is_allowed`'s docstring).
+        if not await fetcher.is_allowed(source.careers_url):
+            return StageResult(
+                status=ExtractionStatus.ROBOTS_DISALLOWED,
+                detail=f"{source.careers_url} disallowed by robots.txt (spec §21.1)",
+            )
+
         learned_url = self._learned_endpoints.get(source.company_id)
         if learned_url:
             postings = await self._try_learned_endpoint(source, learned_url, fetcher)

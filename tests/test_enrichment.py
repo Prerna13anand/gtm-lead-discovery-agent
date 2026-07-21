@@ -144,7 +144,7 @@ async def test_run_stage8_only_enriches_matched_leads(monkeypatch: pytest.Monkey
     matched = _lead(lead_id="matched", email=None, email_status=None, phone=None, linkedin_url="https://linkedin.com/in/x")
     unmatched = _lead(lead_id="unmatched", email=None, email_status=None, phone=None)
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await run_stage8(
             leads=[matched, unmatched], matched_lead_ids={"matched"}, company=_company(),
@@ -170,7 +170,7 @@ async def test_run_stage8_skips_already_complete_leads(monkeypatch: pytest.Monke
     complete_lead = _lead(
         lead_id="complete", email="jane@acme.com", email_status=EmailStatus.VERIFIED, phone="+1-555-0100"
     )
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await run_stage8(
             leads=[complete_lead], matched_lead_ids={"complete"}, company=_company(),
@@ -193,7 +193,7 @@ async def test_run_stage8_weak_identity_match_is_discarded(monkeypatch: pytest.M
         lead_id="weak", email=None, email_status=None, phone=None, linkedin_url=None,
         title_raw="VP Engineering", location_raw="San Francisco",
     )
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await run_stage8(
             leads=[weak_lead], matched_lead_ids={"weak"}, company=_company(),
@@ -214,7 +214,7 @@ async def test_run_stage8_budget_exhausted_marks_skipped(monkeypatch: pytest.Mon
         return httpx.Response(200, text=json.dumps({"data": {}}))
 
     lead = _lead(lead_id="l1", email=None, email_status=None, phone=None)
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     budget = CreditBudget(ceilings={BudgetMeter.PDL_CREDITS: 0})
     try:
         result = await run_stage8(
@@ -234,7 +234,7 @@ async def test_run_stage8_pdl_miss_marks_skipped_not_dropped(monkeypatch: pytest
         return httpx.Response(404, text="not found")
 
     lead = _lead(lead_id="l1", email=None, email_status=None, phone=None, linkedin_url="https://linkedin.com/in/x")
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await run_stage8(
             leads=[lead], matched_lead_ids={"l1"}, company=_company(),

@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from gtm_agent.core.fetch import FetchError, FetchResult
+from gtm_agent.core.fetch import FetchError, FetchResult, RobotsDisallowedError
 from gtm_agent.discovery.extraction.generic_html import GenericHtmlAdapter
 from gtm_agent.discovery.normalization import normalize_batch
 from gtm_agent.models.careers_source import CareersSource, ResolutionStrategy
@@ -48,13 +48,17 @@ class FakeFetcher:
         self,
         responses: dict[str, FetchResult] | None = None,
         raise_for: set[str] | None = None,
+        raise_error_for: dict[str, Exception] | None = None,
     ) -> None:
         self.responses = responses or {}
         self.raise_for = raise_for or set()
+        self.raise_error_for = raise_error_for or {}
         self.requested_urls: list[str] = []
 
     async def get(self, url: str, **kwargs: object) -> FetchResult:
         self.requested_urls.append(url)
+        if url in self.raise_error_for:
+            raise self.raise_error_for[url]
         if url in self.raise_for:
             raise FetchError(f"simulated failure for {url}")
         if url not in self.responses:
@@ -276,6 +280,17 @@ async def test_discover_403_returns_blocked_403() -> None:
 
     assert result.status == ExtractionStatus.BLOCKED_403
     assert result.value is None
+
+
+async def test_discover_robots_disallowed() -> None:
+    fetcher = FakeFetcher(
+        raise_error_for={"https://acme.com/careers": RobotsDisallowedError("https://acme.com/careers disallowed")}
+    )
+    adapter = GenericHtmlAdapter()
+
+    result = await adapter.discover(_source(), fetcher)
+
+    assert result.status == ExtractionStatus.ROBOTS_DISALLOWED
 
 
 async def test_discover_401_returns_blocked_403() -> None:

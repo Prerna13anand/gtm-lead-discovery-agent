@@ -419,19 +419,17 @@ def match(
 
 # --- Optional LLM tie-break (spec §10.7) ------------------------------------
 
-_TIE_BREAK_BAND = 0.05
+TIE_BREAK_BAND = 0.05
 
 
 def needs_tie_break(top_two_scores: tuple[float, float]) -> bool:
     """Spec §10.7: "invoked only when the top candidates are within a narrow
-    band (default 0.05)." Detection only — this codebase does not invoke an
-    LLM to resolve it. Phase 3 is deliberately rules-only (spec §22: "No LLM
-    in the loop yet... this establishes a deterministic, measurable matching
-    baseline"); actually calling `services.azure_openai` for a tie-break
-    belongs with Phase 4's Stage 10 LLM integration, which is where this
-    codebase first wires any LLM into Part II. This function exists now
-    (free, deterministic) so Phase 4 can call it without redesigning this
-    module — it is not itself a partial LLM integration.
+    band (default 0.05)." Detection only — the actual LLM call that
+    resolves a detected tie lives in `leads.tie_break`, an optional async
+    second pass over this module's (synchronous, network-free) `match()`
+    output, following the same pattern `discovery.llm_residue` uses for
+    Stage 4's LLM residue classification. Kept separate so `match()` itself
+    stays pure and every existing call site is unaffected.
     """
     top, second = top_two_scores
-    return (top - second) < _TIE_BREAK_BAND
+    return (top - second) < TIE_BREAK_BAND

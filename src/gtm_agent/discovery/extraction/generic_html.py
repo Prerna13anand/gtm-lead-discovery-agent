@@ -92,7 +92,7 @@ from urllib.parse import urljoin
 
 from selectolax.parser import HTMLParser, Node
 
-from gtm_agent.core.fetch import FetchError, Fetcher
+from gtm_agent.core.fetch import FetchError, Fetcher, RobotsDisallowedError
 from gtm_agent.core.logging import get_logger
 from gtm_agent.discovery.ats_detection import is_job_like_href
 from gtm_agent.models.ats import AtsPlatform
@@ -235,6 +235,8 @@ class GenericHtmlAdapter:
     async def discover(self, source: CareersSource, fetcher: Fetcher) -> StageResult[list[RawPosting], ExtractionStatus]:
         try:
             result = await fetcher.get(source.careers_url)
+        except RobotsDisallowedError as exc:
+            return StageResult(status=ExtractionStatus.ROBOTS_DISALLOWED, detail=str(exc))
         except FetchError as exc:
             logger.info("generic_html_fetch_failed", company_id=source.company_id, error=str(exc))
             return StageResult(status=ExtractionStatus.RATE_LIMITED, detail=str(exc))

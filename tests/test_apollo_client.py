@@ -34,7 +34,7 @@ async def test_not_configured_raises_without_making_a_request(monkeypatch: pytes
         calls["n"] += 1
         return httpx.Response(200, text=json.dumps({"people": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         with pytest.raises(ApolloNotConfiguredError):
             await client.search_people(company_domain="acme.com", titles=["CEO"], fetcher=fetcher)
@@ -52,7 +52,7 @@ async def test_search_posts_domain_titles_and_seniority(monkeypatch: pytest.Monk
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, text=json.dumps({"people": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await client.search_people(
             company_domain="acme.com", titles=["CEO", "CTO"], fetcher=fetcher
@@ -79,7 +79,7 @@ async def test_search_paginates_until_short_page(monkeypatch: pytest.MonkeyPatch
             return httpx.Response(200, text=json.dumps(_people_page(25)))
         return httpx.Response(200, text=json.dumps(_people_page(10)))  # short page — stop
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await client.search_people(company_domain="acme.com", titles=["CEO"], fetcher=fetcher)
     finally:
@@ -95,7 +95,7 @@ async def test_search_stops_at_retrieval_limit(monkeypatch: pytest.MonkeyPatch) 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=json.dumps(_people_page(25)))  # always full pages
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await client.search_people(
             company_domain="acme.com", titles=["CEO"], fetcher=fetcher, limit=50
@@ -114,7 +114,7 @@ async def test_total_entries_read_from_first_page_pagination(monkeypatch: pytest
         payload["pagination"] = {"total_entries": 250}
         return httpx.Response(200, text=json.dumps(payload))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await client.search_people(company_domain="acme.com", titles=["CEO"], fetcher=fetcher)
     finally:
@@ -129,7 +129,7 @@ async def test_http_error_raises_apollo_search_error(monkeypatch: pytest.MonkeyP
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text=json.dumps({"error": "invalid API key"}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         with pytest.raises(ApolloSearchError):
             await client.search_people(company_domain="acme.com", titles=["CEO"], fetcher=fetcher)

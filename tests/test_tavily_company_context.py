@@ -23,7 +23,7 @@ async def test_issues_three_queries_funding_hiring_careers(monkeypatch: pytest.M
         bodies.append(json.loads(request.content))
         return httpx.Response(200, text=json.dumps({"results": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         result = await client.get_company_context(company_domain="acme.com", company_name="Acme", fetcher=fetcher)
     finally:

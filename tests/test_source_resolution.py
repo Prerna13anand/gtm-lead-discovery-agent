@@ -463,7 +463,7 @@ async def test_fetch_and_validate_does_not_leave_a_stored_validator_for_later_re
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_CAREERS_PAGE_HTML, headers={"ETag": '"v1"'})
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         assert await _fetch_and_validate("https://acme.com/careers", fetcher) is True
 

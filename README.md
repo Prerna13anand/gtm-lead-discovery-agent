@@ -8,7 +8,14 @@ engineering specification; this README describes only what is actually built so 
 All five phases of spec §22's Phased Rollout are implemented: **Part I — Job Discovery** (stages 1-5),
 **Part II — Lead Discovery & Matching** (stages 6-9), **Part III — Scoring & Output** (stages 10-11), and the
 Phase 5 hardening/tuning surface (persona-gap detection, suppression/denylist tooling, golden-set automation,
-feedback-agreement and budget-usage tuning inputs). 543 tests pass (`pytest -q`).
+feedback-agreement and budget-usage tuning inputs). 606 tests pass (`pytest -q`).
+
+A subsequent full-project audit against the spec closed out several previously-deferred cross-cutting gaps:
+robots.txt consultation, per-domain rate limiting (concurrency + minimum interval with jitter), honouring
+`Retry-After`, ATS-fingerprinting Signals 5/6 (network-request matching + DNS/CNAME), Stage 4's LLM
+title-residue classification (§7.3), and Stage 7's LLM matching tie-break (§10.7) — all previously TODOs, now
+implemented, tested, and (where a live vendor was reachable) live-verified. See **Known limitations** for what
+remains genuinely open.
 
 **What this is not:** a real sweep orchestrator, scheduler, or production database. `main.py` is a
 single-company CLI demo harness that exercises the full 11-stage pipeline end to end; every persisted "table"
@@ -19,17 +26,23 @@ in spec §15 is a local JSONL file, not a real database. Both are explicit, docu
 
 - Stage 1 — Source Resolution: homepage-link, path-probe, sitemap, and Tavily-search-fallback strategies, plus
   manual override
-- Stage 2 — ATS Fingerprinting: detection-signal architecture and platform registry
+- Stage 2 — ATS Fingerprinting: all six §5.1 detection signals — URL host match, redirect target, embedded
+  script/iframe, DOM markers, network-request matching (`identify_from_captured_requests`), and DNS/CNAME
+  (`_resolve_cname_aliases`, stdlib-only)
 - Stage 3 — Extraction: the `BoardAdapter` interface with real, live-verified adapters for **Greenhouse, Lever,
   Ashby, Workable, SmartRecruiters, Recruitee, and Rippling**, plus a JSON-LD adapter, a heuristic generic-HTML
   fallback, and a Playwright-based rendered-DOM adapter with endpoint-learning
 - Stage 4 — Normalisation: title canonicalisation, location parsing, rules-based function/seniority
-  classification (now exposed publicly — `classify_function`/`classify_seniority` — and reused by Stage 6),
-  `posted_at` inference
+  classification (exposed publicly — `classify_function`/`classify_seniority` — and reused by Stage 6), an
+  optional LLM residue fallback for titles the rules can't resolve (`discovery/llm_residue.py`, spec §7.3,
+  cached by canonical title, live-verified against Azure OpenAI), `posted_at` inference
 - Stage 5 — Change Detection & Identity: the OPEN/MISSING/CLOSED lifecycle, the grace window, `zero_jobs_suspicious`
   handling, and the full event stream (`job_opened`, `job_closed`, `job_reopened`, `job_updated`, `board_emptied`,
   `board_first_seen`)
 - `scrape_run` ledger, coverage metrics (§19.1), and a nightly canary suite (§20.3) against real live boards
+- The shared fetch layer (`core/fetch.py`) now enforces robots.txt (§21.1, `core/robots.py`), a per-domain
+  concurrency semaphore and a minimum-interval-with-jitter rate limit (§16.3/§6.3), and honours `Retry-After`
+  (§6.3) — all previously deferred, all wired into every adapter's `discover()`
 
 ### Part II — Lead Discovery & Matching (spec §9-§12, §15.2, §18, §19.3-§19.5)
 
@@ -38,7 +51,9 @@ in spec §15 is a local JSONL file, not a real database. Both are explicit, docu
   the full §9.7/§17.2 failure taxonomy
 - Stage 7 — Matching: all six §10.3 signals (function alignment, seniority relationship, ownership language,
   recruiter role, location, tenure), the §10.4 headcount modulation (the segment-specific founders-own-everything
-  correction), match-floor/top-K selection, and typed `unmatched_job` reasons
+  correction), match-floor/top-K selection, typed `unmatched_job` reasons, and an optional LLM tie-break
+  (`leads/tie_break.py`, spec §10.7, invoked only within the narrow score band, live-verified against Azure
+  OpenAI)
 - Stage 8 — Enrichment: PDL integration, the §11.2 field-level trust waterfall, §11.3 identity-corroboration
   (rejecting weak name-only matches), and 90-day caching
 - Stage 9 — Company Context: Tavily-backed funding/hiring/careers-cross-check queries, summarised and cached
@@ -121,6 +136,10 @@ configured in this environment; `APOLLO_API_KEY`, `PDL_API_KEY`, and `TAVILY_API
   the rules' founder-driven scores when the job function clearly didn't fit, and setting `disagrees_with_rules`
   accordingly. This is real evidence the §13.1 judge/explain/adjust design works as intended, not just that it
   passes mocked tests.
+- Stage 4's LLM residue classification and Stage 7's LLM tie-break (added during the post-implementation audit)
+  were each live-verified the same way: a genuinely rules-unclassifiable title ("Growth Ninja") was correctly
+  classified `marketing`/`mid`, and a real tied SDR-role match correctly preferred the Head of Sales over a
+  same-scoring founder once the job description named the reporting line.
 - Stages 6 (Apollo), 8 (PDL), and 9 (Tavily company-context) could **not** be live-verified — there is no way
   to test an integration against a real vendor API without credentials. Their failure paths (not-configured,
   HTTP error, budget exhaustion) *were* exercised live end-to-end against a real company (`linear.app`'s real,
@@ -174,10 +193,24 @@ the compliance-relevant guarantee ("never silently re-add them") — but does no
 row, consistent with every other store here being append-only. A real database migration would additionally
 hard-delete or anonymise the row itself.
 
-Earlier phases' own previously-documented limitations (Lever's multi-field description assembly, Greenhouse's
-`offices[]` cross-check, full boilerplate stripping, LLM residue classification for titles the rules-classifier
-can't resolve, the Stage 2/3 board-token double-fetch) remain as originally scoped and are unaffected by
-Phases 3-5's additions.
+**Remaining pre-existing Part I limitations, unaffected by the phases above:** Lever's multi-field description
+assembly (only `description`, not `opening`/`lists`/`additional`), Greenhouse's `offices[]` not cross-checked
+as a secondary location source, full boilerplate stripping / non-English handling (§7.6), and the Stage 2/3
+board-token double-fetch when Stage 2 identifies a platform via redirect. None of these were in this audit's
+findings as required-and-missing; they're pre-existing, intentionally-scoped simplifications documented since
+Phase 1/2.
+
+**Rate limiting does not yet differentiate ATS-API hosts from startup origins.** Spec §16.3: "ATS API hosts
+get a higher allowance than startup origins." `Fetcher`'s per-domain concurrency and minimum-interval
+mechanisms apply the same configured values to every host; teaching the fetch layer about the ATS host list
+(`discovery.ats_platforms`) would introduce a dependency in the wrong direction for a cross-cutting layer — see
+`core/fetch.py`'s module docstring.
+
+**ATS-fingerprinting Signal 5's live wiring is partial.** `identify_from_captured_requests` (the actual
+XHR-URL-matching logic) is implemented and tested, but feeding a rendered-DOM render's captured requests back
+into a live Stage 2 re-run needs a two-pass orchestration this codebase's schedulerless CLI doesn't have (spec
+§16). The rendered-DOM adapter's own endpoint-learning cache already delivers Signal 5's main practical
+benefit (avoiding repeated renders) at the extraction layer.
 
 ## Design reference
 

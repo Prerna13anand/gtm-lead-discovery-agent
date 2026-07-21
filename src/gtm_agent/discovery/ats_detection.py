@@ -3,19 +3,35 @@
 Goal: identify which ATS hosts the company's board, and extract the board
 token needed to call its API.
 
-Phase 1 implements detection signals 1-4 (URL host match, redirect target,
-embedded script/iframe, DOM markers) for Greenhouse, Lever, and Ashby.
+Implements detection signals 1, 2, 3, 4, and 6 (URL host match, redirect
+target, embedded script/iframe, DOM markers, DNS/CNAME) for Greenhouse,
+Lever, and Ashby.
 
-NOT implemented (left as a TODO):
-    - Signal 6, DNS/CNAME lookups for white-labelled boards.
+Signal 6 (`_resolve_cname_aliases`) uses `socket.gethostbyname_ex`'s alias
+list as a stdlib-only, best-effort CNAME signal — it reflects the system
+resolver's own alias-chain resolution (which typically surfaces CNAME
+targets), not a raw authoritative DNS `CNAME` record query. That distinction
+is worth flagging honestly: a resolver that doesn't populate aliases (some
+platforms/`getaddrinfo`-backed resolvers don't) will simply find nothing
+here, degrading silently to "signal absent" rather than lying about it.
 
 Signal 5 (network-request inspection during Playwright rendering) is
-implemented, but not here — it happens as part of the rendered-DOM adapter's
-own render step (`discovery.extraction.rendered_dom`), since that's the only
-place a render actually occurs. What lives here is the *routing* check that
-decides a company needs rendering at all (`has_job_like_content` /
-`has_spa_root_or_ats_embed`, used by `route_extraction`), not the rendering
-itself.
+*partially* implemented: `identify_from_captured_requests` below contains
+the actual signal-matching logic (does a captured XHR/fetch URL match a
+known ATS host?), reusable and independently tested. What is **not** done is
+wiring it back into a live Stage 2 re-run after a rendered-DOM extraction —
+that needs a two-pass orchestration (fingerprint → render → re-fingerprint
+with the captured URLs) this codebase's CLI harness doesn't have, since it
+has no orchestrator at all (spec §16, a pre-existing, already-documented
+scope boundary). The rendered-DOM adapter's own "render once, learn the
+endpoint, never render again" cache (`discovery.extraction.rendered_dom`)
+already delivers Signal 5's main practical benefit — avoiding repeated
+expensive renders — at the extraction layer, even without promoting the
+company to a proper `AtsIdentification` at the fingerprinting layer.
+
+What also lives here is the separate *routing* check that decides a company
+needs rendering at all (`has_job_like_content` / `has_spa_root_or_ats_embed`,
+used by `route_extraction`), not the rendering itself.
 
 Board-token extraction (spec §5.2) lives in `discovery.ats_platforms` — shared
 with Stage 3, since an ATS-API adapter needs to be able to resolve the same
@@ -26,7 +42,10 @@ current vendor URL formats before relying on a new platform's pattern.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import socket
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -92,13 +111,55 @@ _CONFIDENCE_URL_HOST_MATCH = 0.98
 _CONFIDENCE_REDIRECT_TARGET = 0.95
 _CONFIDENCE_EMBED_SIGNAL = 0.90
 _CONFIDENCE_DOM_MARKER = 0.75
+_CONFIDENCE_DNS_CNAME = 0.60  # spec §5.1: "Moderate; useful for white-labelled boards"
+_CONFIDENCE_NETWORK_REQUEST = 0.85  # spec §5.1: "Strong"
 
 _ADAPTER_ROUTING_CONFIDENCE_FLOOR = 0.8  # spec §5.3
+
+DnsResolver = Callable[[str], Awaitable[list[str]]]
+
+
+async def _resolve_cname_aliases(hostname: str) -> list[str]:
+    """Best-effort CNAME alias resolution via the system resolver — see
+    module docstring's caveat on what this can and can't guarantee. Run in
+    a thread since `socket.gethostbyname_ex` is blocking.
+    """
+    try:
+        _, aliases, _ = await asyncio.to_thread(socket.gethostbyname_ex, hostname)
+    except (OSError, socket.gaierror):
+        return []
+    return aliases
+
+
+def identify_from_captured_requests(
+    company_id: str, xhr_urls: list[str], *, now: datetime | None = None
+) -> AtsIdentification | None:
+    """Spec §5.1 Signal 5: "if the page had to be rendered, inspect XHR
+    targets" for a *known* ATS host that carries no static markers. Pure,
+    synchronous, and independently callable — see module docstring for what
+    wiring this into a live two-pass Stage 2 re-run would still require.
+    """
+    now = now or datetime.now(UTC)
+    for url in xhr_urls:
+        platform = known_ats_platform_for_host(urlparse(url).netloc)
+        if platform is not None:
+            return AtsIdentification(
+                company_id=company_id,
+                platform=platform,
+                board_token=extract_board_token(platform, url),
+                confidence=_CONFIDENCE_NETWORK_REQUEST,
+                detection_signal=DetectionSignal.NETWORK_REQUESTS,
+                created_at=now,
+                last_verified_at=now,
+            )
+    return None
 
 
 async def identify_ats(
     source: CareersSource,
     fetcher: Fetcher,
+    *,
+    dns_resolver: DnsResolver = _resolve_cname_aliases,
 ) -> StageResult[AtsIdentification, AtsFingerprintStatus]:
     """Run detection signals in confidence order against a resolved careers source."""
     now = datetime.now(UTC)
@@ -187,14 +248,34 @@ async def identify_ats(
                 )
                 return StageResult(status=AtsFingerprintStatus.IDENTIFIED, value=identification)
 
-    # TODO(later phase): Signal 5 — feed a rendered-DOM adapter's captured
-    # XHR targets back into Stage 2 to catch JS-injected boards that turn
-    # out to be a *known* ATS with no static markers. The rendered-DOM
-    # adapter (discovery.extraction.rendered_dom) already captures and
-    # inspects XHR/fetch responses for its own purpose (spec §6.2.3's
-    # endpoint-learning), but feeding that back into this function would
-    # restructure Stage 2 into a two-pass flow — out of scope here.
-    # TODO(later phase): Signal 6 — DNS/CNAME lookup for white-labelled boards.
+    # Signal 6 — DNS/CNAME lookup for white-labelled boards. Moderate; the
+    # careers hostname itself isn't a known ATS host, but its CNAME target
+    # may be (e.g. `careers.company.com` CNAME'd to a Greenhouse-operated
+    # host). See module docstring for what this signal can and can't
+    # guarantee, and the `dns_cname` open question that motivates a
+    # moderate rather than high confidence.
+    hostname = parsed.netloc.split(":")[0]  # strip a port, if any, before resolving
+    aliases = await dns_resolver(hostname)
+    for alias in aliases:
+        platform = known_ats_platform_for_host(alias)
+        if platform is not None:
+            identification = AtsIdentification(
+                company_id=source.company_id,
+                platform=platform,
+                board_token=extract_board_token(platform, source.careers_url),
+                confidence=_CONFIDENCE_DNS_CNAME,
+                detection_signal=DetectionSignal.DNS_CNAME,
+                created_at=now,
+                last_verified_at=now,
+            )
+            return StageResult(status=AtsFingerprintStatus.IDENTIFIED, value=identification)
+
+    # Signal 5's live wiring (feeding a rendered-DOM render's captured XHR
+    # targets back into this function) is not done here — see module
+    # docstring. `identify_from_captured_requests` implements the signal's
+    # actual matching logic and is independently tested; it is simply not
+    # yet called from a live two-pass Stage 2 re-run, since no orchestrator
+    # exists to drive one (spec §16, pre-existing scope boundary).
 
     logger.info("ats_unknown", company_id=source.company_id, url=source.careers_url)
     return StageResult(status=AtsFingerprintStatus.ATS_UNKNOWN, detail="no detection signal matched")

@@ -69,7 +69,7 @@ async def test_run_stage9_success_returns_context_ok(monkeypatch: pytest.MonkeyP
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text='{"results": [{"url": "https://x", "content": "raised Series A"}]}')
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     budget = CreditBudget()
     try:
         status, context = await run_stage9(
@@ -95,7 +95,7 @@ async def test_run_stage9_not_configured_is_non_blocking(monkeypatch: pytest.Mon
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text='{"results": []}')
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     budget = CreditBudget()
     try:
         status, context = await run_stage9(
@@ -119,7 +119,7 @@ async def test_run_stage9_budget_exhausted_is_non_blocking(monkeypatch: pytest.M
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text='{"results": []}')
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     budget = CreditBudget(ceilings={BudgetMeter.TAVILY_CALLS: 0})
     try:
         status, context = await run_stage9(

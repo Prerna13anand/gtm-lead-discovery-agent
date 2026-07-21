@@ -148,7 +148,7 @@ async def test_run_stage6_success_maps_leads(monkeypatch: pytest.MonkeyPatch) ->
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=json.dumps({"people": [{"id": "p1", "name": "Jane", "title": "CEO"}]}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     budget = CreditBudget()
     try:
         outcome = await run_stage6(
@@ -169,7 +169,7 @@ async def test_run_stage6_empty_result_is_no_leads_found(monkeypatch: pytest.Mon
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=json.dumps({"people": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         outcome = await run_stage6(
             company=_company(), open_jobs=[_job(JobFunction.ENGINEERING)], fetcher=fetcher,
@@ -187,7 +187,7 @@ async def test_run_stage6_apollo_error_is_lead_discovery_failed(monkeypatch: pyt
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="server error")
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         outcome = await run_stage6(
             company=_company(), open_jobs=[_job(JobFunction.ENGINEERING)], fetcher=fetcher,
@@ -204,7 +204,7 @@ async def test_run_stage6_not_configured_is_lead_discovery_failed(monkeypatch: p
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=json.dumps({"people": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         outcome = await run_stage6(
             company=_company(), open_jobs=[_job(JobFunction.ENGINEERING)], fetcher=fetcher,
@@ -227,7 +227,7 @@ async def test_run_stage6_exceeding_cap_via_total_entries_is_identity_suspect(
         }
         return httpx.Response(200, text=json.dumps(payload))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         outcome = await run_stage6(
             company=_company(), open_jobs=[_job(JobFunction.ENGINEERING)], fetcher=fetcher,
@@ -262,7 +262,7 @@ async def test_run_stage6_filters_out_suppressed_leads(monkeypatch: pytest.Monke
         suppression_store=suppression_store,
     )
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         outcome = await run_stage6(
             company=_company(), open_jobs=[_job(JobFunction.ENGINEERING)], fetcher=fetcher,
@@ -283,7 +283,7 @@ async def test_run_stage6_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> N
         calls["n"] += 1
         return httpx.Response(200, text=json.dumps({"people": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     budget = CreditBudget(ceilings={BudgetMeter.APOLLO_CREDITS: 0})
     try:
         outcome = await run_stage6(

@@ -59,7 +59,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from gtm_agent.core.fetch import FetchError, Fetcher
+from gtm_agent.core.fetch import FetchError, Fetcher, RobotsDisallowedError
 from gtm_agent.core.logging import get_logger
 from gtm_agent.discovery.ats_platforms import extract_board_token
 from gtm_agent.models.ats import AtsPlatform
@@ -128,6 +128,8 @@ class AshbyAdapter:
         url = _job_board_url(board_token)
         try:
             result = await fetcher.get(url)
+        except RobotsDisallowedError as exc:
+            return StageResult(status=ExtractionStatus.ROBOTS_DISALLOWED, detail=str(exc))
         except FetchError as exc:
             logger.warning("ashby_fetch_failed", company_id=source.company_id, url=url, error=str(exc))
             return StageResult(status=ExtractionStatus.RATE_LIMITED, detail=str(exc))

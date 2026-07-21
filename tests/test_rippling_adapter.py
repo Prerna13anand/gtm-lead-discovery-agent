@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import pytest
 
-from gtm_agent.core.fetch import FetchError, FetchResult
+from gtm_agent.core.fetch import FetchError, FetchResult, RobotsDisallowedError
 from gtm_agent.discovery.extraction.rippling import RipplingAdapter, _jobs_page_url
 from gtm_agent.models.careers_source import CareersSource, ResolutionStrategy
 from gtm_agent.models.job import RawPosting
@@ -143,13 +143,17 @@ class FakeFetcher:
         self,
         responses: dict[str, FetchResult] | None = None,
         raise_for: set[str] | None = None,
+        raise_error_for: dict[str, Exception] | None = None,
     ) -> None:
         self.responses = responses or {}
         self.raise_for = raise_for or set()
+        self.raise_error_for = raise_error_for or {}
         self.requested_urls: list[str] = []
 
     async def get(self, url: str, **kwargs: object) -> FetchResult:
         self.requested_urls.append(url)
+        if url in self.raise_error_for:
+            raise self.raise_error_for[url]
         if url in self.raise_for:
             raise FetchError(f"simulated failure for {url}")
         if url not in self.responses:
@@ -306,6 +310,16 @@ async def test_discover_blocked_403(adapter: RipplingAdapter) -> None:
     result = await adapter.discover(source, fetcher)
 
     assert result.status == ExtractionStatus.BLOCKED_403
+
+
+async def test_discover_robots_disallowed(adapter: RipplingAdapter) -> None:
+    page0_url = _jobs_page_url("acme", 0)
+    fetcher = FakeFetcher(raise_error_for={page0_url: RobotsDisallowedError(f"{page0_url} disallowed")})
+    source = _source("https://ats.rippling.com/acme/jobs")
+
+    result = await adapter.discover(source, fetcher)
+
+    assert result.status == ExtractionStatus.ROBOTS_DISALLOWED
 
 
 async def test_discover_missing_next_data_returns_schema_violation(adapter: RipplingAdapter) -> None:

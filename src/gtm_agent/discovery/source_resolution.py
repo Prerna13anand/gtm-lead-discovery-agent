@@ -57,7 +57,15 @@ _CONVENTIONAL_PATHS = (
     "/company/careers",
     "/en/careers",
 )
-_PATH_PROBE_DELAY_SECONDS = 0.5  # placeholder politeness gap; real rate limiting is a fetch-layer TODO (§16.3)
+_PATH_PROBE_DELAY_SECONDS = 0.5
+"""Explicit inter-probe delay for Strategy B's sequential path probing (spec
+§4.1: "Probe sequentially with rate limiting, not in parallel"). Redundant
+with — but harmless alongside — `core.fetch.Fetcher`'s own automatic
+per-host minimum-interval enforcement (spec §6.3), which now exists and
+would space these same requests out even without this explicit sleep;
+kept here anyway so Strategy B's own sequencing intent reads directly at
+the call site, not only inside the shared fetch layer.
+"""
 
 # --- Strategy C sitemap.xml (spec §4.1) ---
 _SITEMAP_PATH = "/sitemap.xml"

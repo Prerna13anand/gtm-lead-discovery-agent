@@ -91,6 +91,7 @@ from gtm_agent.discovery.canary import run_canary_suite  # noqa: E402
 from gtm_agent.discovery.canary_targets import CANARY_TARGETS  # noqa: E402
 from gtm_agent.discovery.extraction import get_adapter  # noqa: E402
 from gtm_agent.discovery.lifecycle import ZeroJobsDecision, previously_open_count, run_stage5  # noqa: E402
+from gtm_agent.discovery.llm_residue import resolve_unclassified  # noqa: E402
 from gtm_agent.discovery.normalization import normalize_batch  # noqa: E402
 from gtm_agent.discovery.source_resolution import resolve_source  # noqa: E402
 from gtm_agent.leads.budget import CreditBudget  # noqa: E402
@@ -99,6 +100,7 @@ from gtm_agent.leads.compliance import filter_suppressed, suppression_key  # noq
 from gtm_agent.leads.discovery import needs_refresh, run_stage6  # noqa: E402
 from gtm_agent.leads.enrichment import run_stage8  # noqa: E402
 from gtm_agent.leads.matching import match as run_stage7  # noqa: E402
+from gtm_agent.leads.tie_break import resolve_tie_breaks  # noqa: E402
 from gtm_agent.models.ats import AtsPlatform  # noqa: E402
 from gtm_agent.models.company import Company  # noqa: E402
 from gtm_agent.models.job import RawPosting  # noqa: E402
@@ -116,6 +118,7 @@ from gtm_agent.models.scrape_run import ScrapeRun, ScrapeRunStatus  # noqa: E402
 from gtm_agent.scoring.publication import publish, publish_unmatched, write_csv  # noqa: E402
 from gtm_agent.scoring.ranking import rank  # noqa: E402
 from gtm_agent.scoring.rationale import PROMPT_VERSION, fallback_scored_lead, score_pair  # noqa: E402
+from gtm_agent.services.azure_openai import AzureOpenAIService  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -335,6 +338,17 @@ async def _discover(domain: str, company_name: str, manual_careers_url: str | No
         job_postings = normalize_batch(raw_postings) if raw_postings else []
         if not raw_postings:
             click.echo("  (no postings to normalise — a validated, empty board is a real result, per spec §2.3)")
+
+        # Spec §7.3: "Only titles the rules fail to classify go to an LLM
+        # call, and results are cached by canonical title." Optional — a
+        # missing/unconfigured Azure OpenAI client degrades to Phase 1-3's
+        # original behaviour (unclassified titles stay `None`), never a
+        # hard failure of Stage 4 itself.
+        unclassified_count = sum(1 for j in job_postings if j.function is None or j.seniority is None)
+        if unclassified_count and AzureOpenAIService().is_configured:
+            job_postings = await resolve_unclassified(job_postings)
+            click.echo(f"  LLM residue classification: resolved up to {unclassified_count} unclassified title(s)")
+
         for job in job_postings:
             click.echo(f"  - {job.title_canonical or '(untitled)'}  [{job.function}/{job.seniority}]")
             click.echo(f"      location: {job.location_raw}  workplace: {job.workplace_type}")
@@ -496,6 +510,23 @@ async def _process_part2(company: Company, open_jobs: list[JobPostingRecord], fe
         company=company, leads=leads, jobs=open_jobs, run_id=str(uuid4()), computed_at=now,
         empty_leads_reason=empty_leads_reason,
     )
+
+    # Spec §10.7: optional LLM tie-break — only when the top two candidates
+    # for a job are within the narrow band `leads.matching.TIE_BREAK_BAND`.
+    # Degrades to the rules-only ranking when Azure OpenAI isn't configured,
+    # same optional-second-pass convention as Stage 4's LLM residue step.
+    if result.matches and AzureOpenAIService().is_configured:
+        leads_by_id_for_tie_break = {lead.lead_id: lead for lead in leads}
+        jobs_by_id_for_tie_break = {job.job_id: job for job in open_jobs}
+        tie_outcome = await resolve_tie_breaks(
+            result.matches, jobs_by_id=jobs_by_id_for_tie_break, leads_by_id=leads_by_id_for_tie_break, company=company
+        )
+        result.matches = tie_outcome.matches
+        if tie_outcome.ties_detected:
+            click.echo(
+                f"  LLM tie-break: {tie_outcome.ties_resolved}/{tie_outcome.ties_detected} tie(s) resolved (spec §10.7)"
+            )
+
     match_store.append(result.matches)
     unmatched_store.append(result.unmatched)
     if result.matches:

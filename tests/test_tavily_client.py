@@ -30,7 +30,7 @@ async def test_not_configured_raises_without_making_a_request(monkeypatch: pytes
         calls["n"] += 1
         return httpx.Response(200, text=json.dumps({"results": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         with pytest.raises(TavilyNotConfiguredError):
             await client.search("acme careers", fetcher=fetcher)
@@ -49,7 +49,7 @@ async def test_search_posts_api_key_query_and_include_domains(monkeypatch: pytes
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, text=json.dumps({"results": [{"url": "https://acme.com/careers"}]}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         results = await client.search(
             '"Acme" careers open positions site:acme.com', fetcher=fetcher, restrict_domain="acme.com"
@@ -74,7 +74,7 @@ async def test_search_without_restrict_domain_omits_include_domains(monkeypatch:
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, text=json.dumps({"results": []}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         await client.search('"Acme" jobs', fetcher=fetcher)
     finally:
@@ -89,7 +89,7 @@ async def test_missing_results_key_returns_empty_list(monkeypatch: pytest.Monkey
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=json.dumps({"answer": "no results field here"}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         results = await client.search("query", fetcher=fetcher)
     finally:
@@ -104,7 +104,7 @@ async def test_http_error_raises_tavily_search_error(monkeypatch: pytest.MonkeyP
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text=json.dumps({"error": "invalid API key"}))
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         with pytest.raises(TavilySearchError):
             await client.search("query", fetcher=fetcher)
@@ -118,7 +118,7 @@ async def test_invalid_json_raises_tavily_search_error(monkeypatch: pytest.Monke
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="not json")
 
-    fetcher = Fetcher(transport=httpx.MockTransport(handler))
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
     try:
         with pytest.raises(TavilySearchError):
             await client.search("query", fetcher=fetcher)

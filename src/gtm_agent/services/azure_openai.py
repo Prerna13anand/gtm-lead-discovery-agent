@@ -1,10 +1,12 @@
 """Azure OpenAI service — configuration and client initialisation only.
 
-Per Phase 1 scope: no prompts, no scoring, no LLM calls of any kind. This
-module exists so later phases (function/seniority residue classification in
-§7.3, matching tie-break in §10.7, scoring in Stage 10/§13) have a single,
-already-wired place to get a configured client from, instead of each
-inventing its own initialisation.
+Deliberately holds no prompts or business logic — every actual LLM call
+site builds its own messages and owns its own retry/grounding/validation
+policy, then gets a configured client from here rather than each
+constructing its own:
+    - `discovery.llm_residue` — Stage 4 title residue classification (§7.3)
+    - `leads.tie_break` — Stage 7 optional matching tie-break (§10.7)
+    - `scoring.rationale` — Stage 10 scoring and rationale (§13)
 """
 
 from __future__ import annotations
@@ -32,8 +34,10 @@ class AzureOpenAIService:
     def get_client(self) -> AzureOpenAI:
         """Lazily construct and cache the Azure OpenAI client.
 
-        Raises `AzureOpenAIConfigError` if credentials aren't set — callers
-        in Phase 1 should not be calling this at all (see module docstring).
+        Raises `AzureOpenAIConfigError` if credentials aren't set — every
+        real call site checks `is_configured` first and degrades gracefully
+        (see the module docstring's call sites) rather than calling this
+        when it knows it isn't configured.
         """
         if not self.is_configured:
             raise AzureOpenAIConfigError(
@@ -51,7 +55,3 @@ class AzureOpenAIService:
     @property
     def deployment(self) -> str:
         return self._settings.azure_openai_deployment
-
-    # TODO(phase 2+): title classification residue calls (§7.3)
-    # TODO(phase 3): matching tie-break calls (§10.7)
-    # TODO(phase 4): scoring + rationale calls (§13)

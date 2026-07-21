@@ -61,10 +61,15 @@ class FakeFetcher:
         self,
         responses: dict[str, FetchResult] | None = None,
         raise_for: set[str] | None = None,
+        disallow_for: set[str] | None = None,
     ) -> None:
         self.responses = responses or {}
         self.raise_for = raise_for or set()
+        self.disallow_for = disallow_for or set()
         self.requested_urls: list[str] = []
+
+    async def is_allowed(self, url: str) -> bool:
+        return url not in self.disallow_for
 
     async def get(self, url: str, **kwargs: object) -> FetchResult:
         self.requested_urls.append(url)
@@ -135,6 +140,22 @@ async def test_discover_learns_endpoint_from_captured_json_and_returns_success(f
     assert second.raw_payload["title"] == "Founding Designer"  # mapped from "name"
     assert second.posting_url == "https://acme.com/jobs/2"  # mapped from "link", resolved absolute
     assert second.is_hydrated is False  # no description-shaped key present
+
+
+async def test_discover_robots_disallowed_never_renders() -> None:
+    """Spec §21.1: the Playwright renderer navigates outside `Fetcher`'s own
+    request path, so this must be checked explicitly before rendering —
+    see `Fetcher.is_allowed`'s docstring.
+    """
+    source = _source("https://acme.com/careers")
+    fetcher = FakeFetcher(disallow_for={source.careers_url})
+    renderer = FakeRenderer(result=RenderResult(html="<html></html>", final_url=source.careers_url, xhr_responses=[]))
+    adapter = RenderedDomAdapter(renderer=renderer)
+
+    result = await adapter.discover(source, fetcher)
+
+    assert result.status == ExtractionStatus.ROBOTS_DISALLOWED
+    assert renderer.render_calls == []
 
 
 async def test_discover_ignores_non_job_json_and_falls_back_to_dom_links(fetcher: FakeFetcher) -> None:

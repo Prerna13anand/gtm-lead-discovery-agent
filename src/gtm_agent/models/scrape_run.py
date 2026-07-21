@@ -25,27 +25,24 @@ class ScrapeRunStatus(StrEnum):
     separately so it's traceable to its actual source, not silently folded
     into the §17 table as if it belonged there.
 
-    As of the Phase 2 Rendered-DOM and Generic-HTML adapters, every real
-    extraction path is wired to a status here: `render_timeout` and
-    `parse_degraded` are both reachable (Rendered-DOM's Playwright timeout
+    Every value except one is reachable by this codebase's current logic:
+    `render_timeout` and `parse_degraded` (Rendered-DOM's Playwright timeout
     and its DOM-link fallback; Generic-HTML's heuristic path, always
-    degraded by construction — spec §6.2.4). Three values are still not
-    reachable by this codebase's current logic:
-        - `robots_disallowed` needs fetch-layer robots.txt consultation,
-          an explicit later-phase TODO in `core/fetch.py` (spec §21.1) —
-          a Compliance & Politeness feature, not an extraction-adapter one.
-        - `zero_jobs_suspicious` needs Stage 5 change detection to compare
-          against a prior run, explicitly out of scope until that stage is
-          built (spec: "Change detection is Phase 2, not Phase 1" — deferred
-          further within Phase 2 to keep this milestone scoped).
-        - `partial` is an orchestrator-level outcome ("some pages hydrated,
-          some failed" across a whole run) — no orchestrator exists yet to
-          produce it; it's a property of a multi-posting hydration sweep,
-          not of any single adapter's `discover()`/`hydrate()` call.
-    They are still declared here for schema completeness, matching how
-    `ExtractionStatus`/`SourceResolutionStatus` already include not-yet-
-    reachable values (see models/results.py) — declaring the full enum is
-    not the same as implementing the detection logic behind each value.
+    degraded by construction — spec §6.2.4), `zero_jobs_suspicious` (Stage 5
+    change detection comparing against the prior run, `main.py`'s own
+    handling), and `robots_disallowed` (Stage 2/3's fetches now raise
+    `core.fetch.RobotsDisallowedError` when robots.txt disallows a path,
+    spec §21.1, caught and mapped by each adapter's `discover()`).
+
+    `partial` remains the one unreached value: it's an orchestrator-level
+    outcome ("some pages hydrated, some failed" across a whole run) — no
+    orchestrator exists yet to produce it (spec §16, a pre-existing scope
+    boundary); it's a property of a multi-posting hydration sweep, not of
+    any single adapter's `discover()`/`hydrate()` call. Still declared here
+    for schema completeness, matching how `ExtractionStatus`/
+    `SourceResolutionStatus` already include not-yet-reachable values (see
+    models/results.py) — declaring the full enum is not the same as
+    implementing the detection logic behind each value.
     """
 
     SUCCESS = "success"

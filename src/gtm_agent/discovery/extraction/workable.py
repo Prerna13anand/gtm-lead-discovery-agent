@@ -76,7 +76,7 @@ from typing import Any
 
 from selectolax.parser import HTMLParser
 
-from gtm_agent.core.fetch import FetchError, Fetcher
+from gtm_agent.core.fetch import FetchError, Fetcher, RobotsDisallowedError
 from gtm_agent.core.logging import get_logger
 from gtm_agent.discovery.ats_platforms import extract_board_token
 from gtm_agent.models.ats import AtsPlatform
@@ -164,6 +164,8 @@ class WorkableAdapter:
         url = _widget_url(account)
         try:
             result = await fetcher.get(url)
+        except RobotsDisallowedError as exc:
+            return StageResult(status=ExtractionStatus.ROBOTS_DISALLOWED, detail=str(exc))
         except FetchError as exc:
             logger.warning("workable_fetch_failed", company_id=source.company_id, url=url, error=str(exc))
             return StageResult(status=ExtractionStatus.RATE_LIMITED, detail=str(exc))

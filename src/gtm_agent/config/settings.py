@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     company_denylist_path: str = ".data/company_denylist.jsonl"
     person_suppression_path: str = ".data/person_suppression.jsonl"
 
+    # --- Stage 4 LLM title-residue classification cache (spec §7.3) ---
+    title_classification_cache_path: str = ".data/title_classification_cache.jsonl"
+
     @property
     def azure_openai_configured(self) -> bool:
         """Whether enough Azure OpenAI config is present to initialise a client.

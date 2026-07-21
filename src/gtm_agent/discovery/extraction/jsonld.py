@@ -15,7 +15,7 @@ from typing import Any
 
 from selectolax.parser import HTMLParser
 
-from gtm_agent.core.fetch import FetchError, Fetcher
+from gtm_agent.core.fetch import FetchError, Fetcher, RobotsDisallowedError
 from gtm_agent.core.logging import get_logger
 from gtm_agent.models.ats import AtsPlatform
 from gtm_agent.models.careers_source import CareersSource
@@ -44,6 +44,8 @@ class JsonLdAdapter:
     async def discover(self, source: CareersSource, fetcher: Fetcher) -> StageResult[list[RawPosting], ExtractionStatus]:
         try:
             result = await fetcher.get(source.careers_url)
+        except RobotsDisallowedError as exc:
+            return StageResult(status=ExtractionStatus.ROBOTS_DISALLOWED, detail=str(exc))
         except FetchError as exc:
             logger.info("jsonld_fetch_failed", company_id=source.company_id, error=str(exc))
             return StageResult(status=ExtractionStatus.RATE_LIMITED, detail=str(exc))
