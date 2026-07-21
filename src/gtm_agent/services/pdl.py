@@ -11,8 +11,16 @@ diluted by also supplying `leads.enrichment`'s weakest, most error-prone key
 Endpoint shape follows PDL's public Person Enrichment API
 (`GET /v5/person/enrich`) as documented at integration time — same caveat as
 `services.apollo` and `services.tavily`: verify against current PDL docs
-before production use. **This client has not been exercised against the
-live PDL API** — `PDL_API_KEY` is unset in this environment.
+before production use.
+
+**Live-verified** (post-implementation audit, real `PDL_API_KEY`): the key
+is now sent as an `X-Api-Key` header rather than an `api_key` query
+parameter. This was changed for a real reason found during that
+verification, not preemptively: a query-string key appears in full in any
+request logging (this codebase's own fetch-layer debug logs included, which
+is how a real key value was briefly exposed during manual testing) and in
+any intermediary's access logs — a header avoids that exposure surface
+regardless of which HTTP client or logging config is in front of it.
 """
 
 from __future__ import annotations
@@ -87,9 +95,11 @@ class PDLClient:
         return None
 
     async def _enrich(self, fetcher: Fetcher, identifiers: dict[str, str]) -> dict[str, Any] | None:
-        params = {**identifiers, "api_key": self._settings.pdl_api_key}
+        # X-Api-Key header, not a query parameter — see module docstring.
         try:
-            result = await fetcher.get(_ENRICH_URL, params=params)
+            result = await fetcher.get(
+                _ENRICH_URL, params=identifiers, headers={"X-Api-Key": self._settings.pdl_api_key}
+            )
         except FetchError as exc:
             raise PDLEnrichError(f"PDL enrich request failed: {exc}") from exc
 

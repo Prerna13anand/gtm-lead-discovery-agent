@@ -50,6 +50,7 @@ async def test_search_posts_domain_titles_and_seniority(monkeypatch: pytest.Monk
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen["body"] = json.loads(request.content)
+        seen["headers"] = request.headers
         return httpx.Response(200, text=json.dumps({"people": []}))
 
     fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
@@ -67,6 +68,12 @@ async def test_search_posts_domain_titles_and_seniority(monkeypatch: pytest.Monk
     assert "manager" in body["person_seniorities"]
     assert result.people == []
     assert result.total_entries is None
+
+    # Live-verified (post-implementation audit): Apollo's real API rejects
+    # the key in the JSON body (422 INVALID_API_KEY_LOCATION) — it must be
+    # sent as an `X-Api-Key` header instead.
+    assert seen["headers"]["x-api-key"] == "secret"
+    assert "api_key" not in body
 
 
 async def test_search_paginates_until_short_page(monkeypatch: pytest.MonkeyPatch) -> None:

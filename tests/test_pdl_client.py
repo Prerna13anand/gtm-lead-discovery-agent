@@ -52,9 +52,11 @@ async def test_no_identifiers_returns_none_without_a_request(monkeypatch: pytest
 async def test_tries_linkedin_first_and_stops_on_match(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(monkeypatch)
     seen_params: list[dict] = []
+    seen_headers: list[httpx.Headers] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_params.append(dict(request.url.params))
+        seen_headers.append(request.headers)
         return httpx.Response(200, text=json.dumps({"data": {"job_title": "CTO"}}))
 
     fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
@@ -72,6 +74,13 @@ async def test_tries_linkedin_first_and_stops_on_match(monkeypatch: pytest.Monke
     assert result == {"job_title": "CTO"}
     assert len(seen_params) == 1
     assert seen_params[0]["profile"] == "https://linkedin.com/in/x"
+
+    # Live-verified (post-implementation audit): the key must be sent as an
+    # X-Api-Key header, not an api_key query parameter — a query parameter
+    # ends up in plaintext in request logs (a real key was briefly exposed
+    # this way during manual live testing).
+    assert seen_headers[0]["x-api-key"] == "pdl-test-key"
+    assert "api_key" not in seen_params[0]
 
 
 async def test_falls_through_linkedin_miss_to_email(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,9 +13,16 @@ Endpoint shape follows Apollo's public People Search API
 codebase's existing convention for third-party APIs (spec Appendix A's build
 note, and `services.tavily`'s identical caveat for its own endpoint): treat
 this as a starting point, not a contract, and verify against Apollo's current
-API docs before relying on it in production. **This client has not been
-exercised against the live Apollo API** — `APOLLO_API_KEY` is unset in this
-environment, so live verification could not be performed (see project report).
+API docs before relying on it in production.
+
+**Live-verified** (post-implementation audit, real `APOLLO_API_KEY`): the
+first live call returned `422 INVALID_API_KEY_LOCATION` — Apollo's current
+API requires the key in an `X-Api-Key` request header, not the `api_key`
+JSON body field its older documented shape used. Fixed below; the rest of
+the request shape (`q_organization_domains`, `person_titles`,
+`person_seniorities`, pagination) has not yet been independently confirmed
+against a real non-empty result set and should still be treated as
+best-effort pending that.
 """
 
 from __future__ import annotations
@@ -98,9 +105,11 @@ class ApolloClient:
         people: list[dict[str, Any]] = []
         total_entries: int | None = None
         page = 1
+        # Live-verified: Apollo rejects the key in the JSON body
+        # (422 INVALID_API_KEY_LOCATION) — it must be an `X-Api-Key` header.
+        headers = {"X-Api-Key": self._settings.apollo_api_key}
         while len(people) < limit:
             payload: dict[str, Any] = {
-                "api_key": self._settings.apollo_api_key,
                 "q_organization_domains": company_domain,
                 "person_titles": titles,
                 "person_seniorities": list(seniority_floor),
@@ -108,7 +117,7 @@ class ApolloClient:
                 "per_page": _PER_PAGE,
             }
             try:
-                result = await fetcher.post(_SEARCH_URL, json=payload)
+                result = await fetcher.post(_SEARCH_URL, json=payload, headers=headers)
             except FetchError as exc:
                 raise ApolloSearchError(f"Apollo search request failed: {exc}") from exc
 
