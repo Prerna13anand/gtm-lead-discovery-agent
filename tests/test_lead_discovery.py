@@ -130,6 +130,47 @@ def test_person_to_lead_founder_and_recruiter_flags():
     assert recruiter.is_recruiter is True
 
 
+def test_person_to_lead_builds_name_from_first_and_obfuscated_last_name():
+    """Live-verified (post-implementation audit): Apollo's real
+    `mixed_people/api_search` response has no `name` field at all — only
+    `first_name` and `last_name_obfuscated`. Without this fallback every
+    real person would have been silently dropped.
+    """
+    person = {"id": "p1", "first_name": "Tuomas", "last_name_obfuscated": "Ar***n", "title": "Co-Founder"}
+    lead = person_to_lead(person, company_id="acme", retrieved_at=NOW)
+    assert lead is not None
+    assert lead.full_name == "Tuomas Ar***n"
+    assert lead.is_founder is True
+
+
+def test_person_to_lead_prefers_full_name_over_first_and_last_when_present():
+    person = {"name": "Full Name", "first_name": "First", "last_name_obfuscated": "La**t", "title": "CEO"}
+    lead = person_to_lead(person, company_id="acme", retrieved_at=NOW)
+    assert lead.full_name == "Full Name"
+
+
+def test_person_to_lead_no_name_fields_at_all_returns_none():
+    assert person_to_lead({"title": "CEO"}, company_id="acme", retrieved_at=NOW) is None
+
+
+def test_person_to_lead_apollo_search_response_has_no_contact_details():
+    """Live-verified: the real search response only has `has_email` /
+    `has_direct_phone` boolean flags, not actual values — email/phone/
+    linkedin/location must stay unknown from Apollo alone, which is exactly
+    the gap Stage 8's PDL enrichment (spec §11) exists to fill.
+    """
+    person = {
+        "id": "p1", "first_name": "Cristina", "last_name_obfuscated": "Co***a", "title": "COO",
+        "has_email": True, "has_direct_phone": "Yes", "has_city": True,
+    }
+    lead = person_to_lead(person, company_id="acme", retrieved_at=NOW)
+    assert lead is not None
+    assert lead.email is None
+    assert lead.phone is None
+    assert lead.linkedin_url is None
+    assert lead.location_raw is None
+
+
 # --- run_stage6 orchestration ----------------------------------------------
 
 

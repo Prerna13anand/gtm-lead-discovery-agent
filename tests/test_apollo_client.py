@@ -61,7 +61,7 @@ async def test_search_posts_domain_titles_and_seniority(monkeypatch: pytest.Monk
     finally:
         await fetcher.aclose()
 
-    assert seen["url"] == "https://api.apollo.io/v1/mixed_people/search"
+    assert seen["url"] == "https://api.apollo.io/v1/mixed_people/api_search"
     body = seen["body"]
     assert body["q_organization_domains"] == "acme.com"
     assert body["person_titles"] == ["CEO", "CTO"]
@@ -113,12 +113,16 @@ async def test_search_stops_at_retrieval_limit(monkeypatch: pytest.MonkeyPatch) 
     assert len(result.people) == 50  # capped, not 75
 
 
-async def test_total_entries_read_from_first_page_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_total_entries_read_from_first_page_top_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live-verified (post-implementation audit): `total_entries` is a
+    top-level response field, not nested under a `pagination` object as
+    originally assumed.
+    """
     client = _client(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = _people_page(5)
-        payload["pagination"] = {"total_entries": 250}
+        payload["total_entries"] = 250
         return httpx.Response(200, text=json.dumps(payload))
 
     fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
@@ -140,5 +144,72 @@ async def test_http_error_raises_apollo_search_error(monkeypatch: pytest.MonkeyP
     try:
         with pytest.raises(ApolloSearchError):
             await client.search_people(company_domain="acme.com", titles=["CEO"], fetcher=fetcher)
+    finally:
+        await fetcher.aclose()
+
+
+# --- reveal_person (People Match / reveal — live-verified) ------------------
+
+
+async def test_reveal_person_posts_id_and_reveal_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch, api_key="secret")
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        seen["headers"] = request.headers
+        return httpx.Response(200, text=json.dumps({"person": {"name": "Tuomas Artman", "email": "t@linear.app"}}))
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        person = await client.reveal_person(person_id="p1", fetcher=fetcher)
+    finally:
+        await fetcher.aclose()
+
+    assert seen["url"] == "https://api.apollo.io/v1/people/match"
+    assert seen["body"] == {"id": "p1", "reveal_personal_emails": True, "reveal_phone_number": False}
+    assert seen["headers"]["x-api-key"] == "secret"
+    assert person == {"name": "Tuomas Artman", "email": "t@linear.app"}
+
+
+async def test_reveal_person_404_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        person = await client.reveal_person(person_id="p1", fetcher=fetcher)
+    finally:
+        await fetcher.aclose()
+    assert person is None
+
+
+async def test_reveal_person_not_configured_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch, api_key="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=json.dumps({"person": {}}))
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        with pytest.raises(ApolloNotConfiguredError):
+            await client.reveal_person(person_id="p1", fetcher=fetcher)
+    finally:
+        await fetcher.aclose()
+
+
+async def test_reveal_person_http_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="server error")
+
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        with pytest.raises(ApolloSearchError):
+            await client.reveal_person(person_id="p1", fetcher=fetcher)
     finally:
         await fetcher.aclose()

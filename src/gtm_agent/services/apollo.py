@@ -15,14 +15,47 @@ note, and `services.tavily`'s identical caveat for its own endpoint): treat
 this as a starting point, not a contract, and verify against Apollo's current
 API docs before relying on it in production.
 
-**Live-verified** (post-implementation audit, real `APOLLO_API_KEY`): the
-first live call returned `422 INVALID_API_KEY_LOCATION` — Apollo's current
-API requires the key in an `X-Api-Key` request header, not the `api_key`
-JSON body field its older documented shape used. Fixed below; the rest of
-the request shape (`q_organization_domains`, `person_titles`,
-`person_seniorities`, pagination) has not yet been independently confirmed
-against a real non-empty result set and should still be treated as
-best-effort pending that.
+**Live-verified** (post-implementation audit, real `APOLLO_API_KEY`), in
+three rounds, each surfacing a real, fixed issue:
+
+1. `422 INVALID_API_KEY_LOCATION` — the key must be an `X-Api-Key` request
+   header, not the `api_key` JSON body field the older documented shape used.
+2. `422`, different body: `"This endpoint is deprecated for API callers.
+   Please use the new mixed_people/api_search endpoint."` —
+   `mixed_people/search` (this module's original URL) is retired for API
+   access; `mixed_people/api_search` is current.
+3. Once both were fixed, a real non-empty result (6 real Linear people,
+   including a real co-founder) confirmed the endpoint works — **but the
+   response shape differs from what this module originally assumed**:
+   - No `name` field. Only `first_name` and `last_name_obfuscated` (e.g.
+     `"Ar***n"`) — Apollo's search response does not reveal a full last name
+     without a separate, additional per-person paid "reveal" call
+     (`people/match`-style enrichment) this codebase does not implement.
+     `leads.discovery.person_to_lead` builds `full_name` from these two
+     fields; the result is genuinely partially-masked, not a bug to "fix"
+     further without adding that separate reveal step.
+   - No `email`, `phone_numbers`, or `linkedin_url` values — only boolean
+     `has_email` / `has_direct_phone` flags. Contact details require the
+     same reveal step above. This is a fine degradation within this
+     codebase's existing design: those fields simply stay `None` from
+     Apollo, and Stage 8's PDL enrichment (spec §11) is already the
+     mechanism meant to fill exactly this kind of gap.
+   - No `city`/`state`/`country` string values either, only `has_city`
+     etc. booleans — `Lead.location_raw` will be `None` from Apollo alone.
+   - `total_entries` is a **top-level** field, not nested under a
+     `pagination` object as originally assumed.
+
+**Reveal step added** (same audit, live-verified): `reveal_person` calls
+Apollo's real `POST /v1/people/match` with a search result's `id`, which
+returns the full, unmasked person — real `name`, `email` (+ `email_status`),
+`linkedin_url`, `city`/`state`/`country`. Confirmed against a real person
+(Linear's real co-founder): returned a verified real email and full name.
+This is the step spec §9.3's "prefer verified email/phone" implicitly
+assumed Apollo's search would already provide directly; in the current API
+it's a distinct, separately-credited call, only worth making for leads that
+actually matched something (spec §11.1's "enrich late" principle, applied
+here to Apollo's own reveal rather than only to PDL) — see
+`leads.apollo_reveal`.
 """
 
 from __future__ import annotations
@@ -37,7 +70,8 @@ from gtm_agent.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-_SEARCH_URL = "https://api.apollo.io/v1/mixed_people/search"
+_SEARCH_URL = "https://api.apollo.io/v1/mixed_people/api_search"
+_MATCH_URL = "https://api.apollo.io/v1/people/match"
 
 # Spec §9.3: "Seniority: Manager and above, plus recruiting at any level."
 # Apollo's `person_seniorities` filter is additive (an OR across values), so
@@ -65,7 +99,7 @@ class ApolloSearchError(Exception):
 class ApolloSearchResult:
     """`people` is capped at the retrieval limit (spec §9.4: "paginate to the
     cap, then stop"). `total_entries` — Apollo's own reported match count,
-    read from the first page's pagination metadata — lets the caller detect
+    read from the first page's top-level response — lets the caller detect
     "more than the cap exists" *without* over-fetching just to count it, per
     §9.4: "If a company returns more than the cap... treat it as
     `company_identity_suspect` rather than truncating silently." `None` if
@@ -129,10 +163,9 @@ class ApolloClient:
             except ValueError as exc:
                 raise ApolloSearchError(f"Apollo search returned invalid JSON: {exc}") from exc
 
-            if page == 1 and isinstance(data, dict):
-                pagination = data.get("pagination")
-                if isinstance(pagination, dict) and isinstance(pagination.get("total_entries"), int):
-                    total_entries = pagination["total_entries"]
+            if page == 1 and isinstance(data, dict) and isinstance(data.get("total_entries"), int):
+                # Live-verified: top-level, not nested under a "pagination" key.
+                total_entries = data["total_entries"]
 
             batch = data.get("people") if isinstance(data, dict) else None
             if not isinstance(batch, list) or not batch:
@@ -152,3 +185,41 @@ class ApolloClient:
             total_entries=total_entries,
         )
         return ApolloSearchResult(people=people, total_entries=total_entries)
+
+    async def reveal_person(self, *, person_id: str, fetcher: Fetcher) -> dict[str, Any] | None:
+        """Apollo People Match — live-verified (see module docstring). Reveals
+        the full, unmasked record for one search result's `id`: real name,
+        email (+ status), LinkedIn, and location. A separate, credited call
+        per person — callers should only make it for leads that matched
+        something (spec §11.1's "enrich late" principle), which is why this
+        client doesn't call it itself from `search_people`.
+
+        Returns `None` on a 404 (no match for this id — treated as a miss,
+        not an error, same convention as `services.pdl`). Phone reveal is
+        deliberately not requested here: Apollo's phone reveal is a
+        separate, typically asynchronous/webhook-based flow this codebase
+        does not implement — email/name/LinkedIn/location are what this
+        synchronous call can actually return.
+        """
+        if not self.is_configured:
+            raise ApolloNotConfiguredError("APOLLO_API_KEY is not set")
+
+        headers = {"X-Api-Key": self._settings.apollo_api_key}
+        payload = {"id": person_id, "reveal_personal_emails": True, "reveal_phone_number": False}
+        try:
+            result = await fetcher.post(_MATCH_URL, json=payload, headers=headers)
+        except FetchError as exc:
+            raise ApolloSearchError(f"Apollo people/match request failed: {exc}") from exc
+
+        if result.status_code == 404:
+            return None
+        if result.status_code >= 400:
+            raise ApolloSearchError(f"Apollo people/match returned HTTP {result.status_code}")
+
+        try:
+            data = json.loads(result.text)
+        except ValueError as exc:
+            raise ApolloSearchError(f"Apollo people/match returned invalid JSON: {exc}") from exc
+
+        person = data.get("person") if isinstance(data, dict) else None
+        return person if isinstance(person, dict) else None

@@ -12,6 +12,19 @@ PDL's exact response field names (`work_email`, `job_title`,
 codebase's best-effort guess at PDL's public Person Enrichment schema,
 following the same "not exercised against the live API" caveat as
 `services.pdl` itself — verify against current PDL docs before production use.
+
+**Live-verified** (post-implementation audit, real leads from a real Apollo
+sweep): every single name+domain PDL lookup returned a genuine 404 — a 100%
+failure rate, not a coincidence. Cause: Apollo's real search response only
+ever supplies an obfuscated last name (e.g. `"Doug Pa***r"` —
+`leads.discovery.person_to_lead`'s own docstring already flags this), and
+that literal masked string was being sent to PDL's `name` search parameter
+verbatim. No real person is named "Pa***r"; PDL's fuzzy name matching has no
+chance against it. `_pdl_search_name` below strips this down to just the
+first name when a mask is detected, trading a broader (weaker) query for a
+real chance of a match — safe specifically because `has_corroboration`
+already exists to reject a false-positive hit on the weakest key, so
+broadening the query doesn't broaden what gets *accepted*.
 """
 
 from __future__ import annotations
@@ -32,6 +45,20 @@ logger = get_logger(__name__)
 
 # Spec §11.4: "cached per lead with a 90-day TTL."
 _ENRICHMENT_STALENESS_DAYS = 90
+
+
+def _pdl_search_name(full_name: str) -> str:
+    """Live-verified fix — see module docstring. `full_name` may be an
+    Apollo-obfuscated name (e.g. `"Doug Pa***r"`); sending that literal
+    string to PDL is a guaranteed miss. Falls back to the first token
+    (first name) only, which is a real, if weaker, search key — accuracy is
+    still protected by `has_corroboration`'s title/location check before any
+    result from this weaker key is accepted.
+    """
+    if "*" not in full_name:
+        return full_name
+    first_token = full_name.split()[0] if full_name.split() else full_name
+    return first_token
 
 
 def needs_enrichment(lead: LeadRecord) -> bool:
@@ -208,7 +235,7 @@ async def run_stage8(
                 fetcher=fetcher,
                 linkedin_url=lead.linkedin_url,
                 work_email=lead.email,
-                full_name=lead.full_name if matched_via_name_only else None,
+                full_name=_pdl_search_name(lead.full_name) if matched_via_name_only else None,
                 company_domain=company.domain if matched_via_name_only else None,
             )
         except (PDLNotConfiguredError, PDLEnrichError) as exc:

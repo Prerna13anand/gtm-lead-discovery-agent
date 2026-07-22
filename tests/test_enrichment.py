@@ -10,6 +10,7 @@ from gtm_agent.config.settings import Settings
 from gtm_agent.core.fetch import Fetcher
 from gtm_agent.leads.budget import BudgetMeter, CreditBudget
 from gtm_agent.leads.enrichment import (
+    _pdl_search_name,
     apply_enrichment,
     has_corroboration,
     is_enrichment_stale,
@@ -32,6 +33,25 @@ def _lead(**overrides) -> LeadRecord:
     )
     base.update(overrides)
     return LeadRecord(**base)
+
+
+# --- _pdl_search_name (pure) ------------------------------------------------
+
+
+def test_pdl_search_name_passes_through_unmasked_name():
+    assert _pdl_search_name("Jane Doe") == "Jane Doe"
+
+
+def test_pdl_search_name_strips_apollo_obfuscated_surname():
+    """Live-verified: Apollo's real search response gives obfuscated last
+    names (e.g. "Doug Pa***r"); sending that literal string to PDL produced
+    a 100% 404 rate across every real lead in a live sweep.
+    """
+    assert _pdl_search_name("Doug Pa***r") == "Doug"
+
+
+def test_pdl_search_name_single_token_obfuscated():
+    assert _pdl_search_name("Xy***z") == "Xy***z"  # no space to split on; passed through as-is
 
 
 # --- needs_enrichment / staleness / should_attempt (pure) -----------------
@@ -203,6 +223,32 @@ async def test_run_stage8_weak_identity_match_is_discarded(monkeypatch: pytest.M
         await fetcher.aclose()
     assert result[0].enrichment_status == EnrichmentStatus.ENRICHMENT_IDENTITY_WEAK
     assert result[0].email is None  # PDL data discarded, not merged
+
+
+async def test_run_stage8_sends_stripped_name_for_apollo_obfuscated_lead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live-verified fix: an Apollo-obfuscated full name (e.g. "Doug
+    Pa***r") must never be sent to PDL verbatim — it's a guaranteed 404.
+    """
+    client = _pdl_client(monkeypatch)
+    seen_params: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(404, text="not found")
+
+    obfuscated_lead = _lead(
+        lead_id="l1", full_name="Doug Pa***r", email=None, email_status=None, phone=None, linkedin_url=None,
+    )
+    fetcher = Fetcher(transport=httpx.MockTransport(handler), respect_robots=False, min_request_interval_seconds=0)
+    try:
+        await run_stage8(
+            leads=[obfuscated_lead], matched_lead_ids={"l1"}, company=_company(),
+            fetcher=fetcher, budget=CreditBudget(), pdl_client=client, now=NOW,
+        )
+    finally:
+        await fetcher.aclose()
+
+    assert seen_params[0]["name"] == "Doug"
 
 
 async def test_run_stage8_budget_exhausted_marks_skipped(monkeypatch: pytest.MonkeyPatch) -> None:

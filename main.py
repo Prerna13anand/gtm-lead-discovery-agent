@@ -98,6 +98,7 @@ from gtm_agent.leads.budget import CreditBudget  # noqa: E402
 from gtm_agent.leads.company_context import is_context_stale, run_stage9  # noqa: E402
 from gtm_agent.leads.compliance import filter_suppressed, suppression_key  # noqa: E402
 from gtm_agent.leads.discovery import needs_refresh, run_stage6  # noqa: E402
+from gtm_agent.leads.apollo_reveal import run_apollo_reveal  # noqa: E402
 from gtm_agent.leads.enrichment import run_stage8  # noqa: E402
 from gtm_agent.leads.matching import match as run_stage7  # noqa: E402
 from gtm_agent.leads.tie_break import resolve_tie_breaks  # noqa: E402
@@ -540,10 +541,23 @@ async def _process_part2(company: Company, open_jobs: list[JobPostingRecord], fe
     click.echo("\n== Stage 8: Enrichment ==")
     matched_lead_ids = {m.lead_id for m in result.matches}
     if matched_lead_ids:
+        # Apollo reveal first (real name/email/LinkedIn/location for
+        # matched leads only — see leads/apollo_reveal.py for why this
+        # exists), then PDL fills whatever gaps remain — spec §11.2's
+        # "Apollo is primary" waterfall, applied to Apollo's own reveal step.
+        revealed = await run_apollo_reveal(
+            leads=leads, matched_lead_ids=matched_lead_ids, fetcher=fetcher, budget=budget
+        )
         enriched = await run_stage8(
-            leads=leads, matched_lead_ids=matched_lead_ids, company=company, fetcher=fetcher, budget=budget
+            leads=revealed, matched_lead_ids=matched_lead_ids, company=company, fetcher=fetcher, budget=budget
         )
         lead_store.save(enriched)
+        # Live-verified bug fix: without this, Stage 10/11 below kept
+        # reading the pre-Stage-8 `leads` list, so revealed/enriched
+        # contact info (a real email, live-confirmed working) never
+        # reached scoring or the final ranked output — every lead showed
+        # "no contact on file" regardless of what Stage 6/8 actually found.
+        leads = enriched
         for lead in enriched:
             if lead.lead_id in matched_lead_ids:
                 click.echo(f"  {lead.lead_id}: {lead.enrichment_status.value}")

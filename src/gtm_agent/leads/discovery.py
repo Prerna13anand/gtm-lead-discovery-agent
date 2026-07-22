@@ -132,6 +132,27 @@ def _extract_tenure_months(person: dict[str, Any], *, now: datetime) -> int | No
     return max(0, months)
 
 
+def _apollo_full_name(person: dict[str, Any]) -> str | None:
+    """Live-verified (post-implementation audit): Apollo's real
+    `mixed_people/api_search` response has no `name` field — only
+    `first_name` and `last_name_obfuscated` (e.g. `"Ar***n"`). A fully
+    revealed `last_name` would take priority if a caller's plan ever
+    returns one (a bulk `people/match` reveal call, which this codebase
+    does not implement, is Apollo's documented way to get one) — but a
+    partially-masked name is still real, usable identification for GTM
+    purposes when paired with title and company, not a reason to drop the
+    lead entirely.
+    """
+    name = person.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+
+    first_name = person.get("first_name")
+    last_name = person.get("last_name") or person.get("last_name_obfuscated")
+    parts = [p.strip() for p in (first_name, last_name) if isinstance(p, str) and p.strip()]
+    return " ".join(parts) if parts else None
+
+
 def person_to_lead(
     person: dict[str, Any],
     *,
@@ -141,9 +162,9 @@ def person_to_lead(
     """Map one raw Apollo person dict to a `Lead` (spec §9.5). Returns `None`
     for a record with no usable name or title — not enough to act on.
     """
-    full_name = person.get("name")
+    full_name = _apollo_full_name(person)
     title_raw = person.get("title")
-    if not isinstance(full_name, str) or not full_name.strip():
+    if not full_name:
         return None
     if not isinstance(title_raw, str) or not title_raw.strip():
         return None
